@@ -89,6 +89,13 @@ The shipped defaults (`atmo_scale=1.5`, `haze=0.1`, `cloud_scale=4`,
 
 ### On-device gate (Pythonista)
 
+`examples/device_check.py` automates all of this; read its report with
+`python -m orbitgfx.tools.device_report <zip> --render`. It also checks the GPU's
+float maths (refrDegAt, altitudeKm, trig) against `astro.refraction_deg`, whether
+a shader on the device can detect a NaN at all (Metal fast-math may fold
+NANCHECK's `x == x` away, which would make a clean NaN scan meaningless), what
+`pow()` of a negative base returns, and the cost of REFRACTION.
+
 1. Compile every quality preset (`LEGACY`, `LOW`, `MED`, `HIGH`, `ULTRA`,
    including the reduced-resolution two-pass ones) with all features; record compiler warnings.
 2. Record texture count, memory, frame rate and thermal behaviour over a few

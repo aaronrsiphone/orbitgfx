@@ -18,7 +18,8 @@ orbitgfx/                     drop this one folder into site-packages
   ivp.py                      NumPy-only RK45 solve_ivp (SciPy-compatible subset)
   coastlines.py               Natural Earth 1:110m coastlines loader
   data/                       ne_110m_coastline.geojson (public domain, bundled)
-  examples/                   mission_control.py (the full app), globe_demo.py (40 lines)
+  examples/                   mission_control.py (the full app), globe_demo.py (40 lines),
+                              sunset.py, phase_check.py, device_check.py (on-device verification)
   sandbox/                    desktop only, never imported on device
     runner.py, render.py      Runner API and the screenshot CLI
     shim/                     emulated scene + ui (put on sys.path only on desktop)
@@ -45,6 +46,17 @@ script). Only Pythonista built-ins are used: `scene`, `ui`, NumPy, PIL.
   orbitgfx.
 - **Texture cache.** The baked Earth texture is cached in
   `orbitgfx/.orbitgfx_cache/`. Delete that folder to rebuild it.
+- **Verify a device.** Run `examples/device_check.py` (about 8 minutes, hands
+  off, plugged in, Low Power Mode off). It compiles every preset with Apple's
+  shader compiler, scans for NaN pixels, evaluates the refraction and unit
+  maths on the GPU against the CPU, times every preset (headroom, build and
+  first-frame hitches, REFRACTION cost, weather-film hitches), records heat and
+  memory, checks `update()` runs once per frame and saves fixed-pose
+  screenshots. Tap DONE to share `orbitgfx_device_report.zip`; on a desktop,
+  `python -m orbitgfx.tools.device_report orbitgfx_device_report.zip --render`
+  lists findings and diffs the screenshots against sandbox renders. Set
+  `QUICK = True` for a 3-minute run or `ONLY = ('bench',)` for chosen stages;
+  after a crash, run it again and it skips the step that failed.
 
 ```python
 import scene, time
