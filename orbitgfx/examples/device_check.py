@@ -200,9 +200,16 @@ def probes():
             -6.0, 11.0, km1, lambda x: x, 2e-3),
            ('apparent elev h0', 'degrees(asin(refrSin(1.0, sin(radians(x)))))', -3.0, 10.0,
             -3.0, 11.0, km1, lambda x: x + refraction_deg(x, 0.0, km1), 2e-3),
-           # informational: is pow(negative, 2) x^2, 0 or NaN here (README rule 1), and can
-           # a shader see a NaN at all (NANCHECK's x == x test; fast-math may fold it)?
+           # informational: what pow() of a negative base gives here (README rule 1;
+           # Mesa: NaN for 5.0 and 2.5, but x * x for 2.0, which compilers rewrite),
+           # whether 1 - z can round below 0 (sqrt(1.0), a normalised dot), and whether
+           # a shader can see a NaN at all (NANCHECK's x == x; fast-math may fold it)
+           ('pow(x, 5)', 'pow(x, 5.0)', -1.0, 1.0, -1.0, 1.0, km1, None, None),
            ('pow(x, 2)', 'pow(x, 2.0)', -1.0, 1.0, 0.0, 1.0, km1, None, None),
+           ('1 - sqrt(1 - x^2)', '1.0 - sqrt(max(1.0 - x * x, 0.0))', -1e-3, 1e-3, -1e-6, 1e-6,
+            km1, None, None),
+           ('1 - |normalize(v)|^2', '1.0 - dot(normalize(vec3(x, 0.31, 0.73)), normalize(vec3(x, 0.31, 0.73)))',
+            -1.0, 1.0, -1e-6, 1e-6, km1, None, None),
            ('sees NaN of sqrt(x)', '(sqrt(x) == sqrt(x)) ? 1.0 : 0.0', -1.0, 1.0, 0.0, 1.0, km1, None, None),
            ('sees NaN, abs test', '(abs(sqrt(x)) < 1e30) ? 1.0 : 0.0', -1.0, 1.0, 0.0, 1.0, km1, None, None)]
     for h in (0.0, 0.4, 2.0, 10.0, 30.0):

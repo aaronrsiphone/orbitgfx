@@ -369,9 +369,18 @@ Mono instead of Menlo, so text widths differ slightly.
 
 ## Rules that keep GPU code working on iOS
 
-1. **No negative bases in `pow`.** `pow(x, y)` with `x < 0` is undefined in
-   GLSL ES, and Apple GPUs return NaN. Square with `x * x` instead.
-   `lint_glsl` flags this.
+1. **No negative bases in `pow`.** GPUs compute `pow(x, y)` as
+   `exp2(y * log2(x))`, so GLSL ES leaves it undefined for `x < 0`, and for
+   `x == 0` with `y <= 0`. Mesa returns NaN for `pow(-0.5, 5.0)` but `0.25` for
+   `pow(-0.5, 2.0)` (it rewrites that as `x * x`), so the desktop is not a
+   guide; `examples/device_check.py` records what a device does. Multiply small
+   integer powers out (`x * x * x * x * x`) and clamp other bases first
+   (`pow(max(x, 0.0), 2.5)`). Mind rounding: `1.0 - z` with `z` a cosine or a
+   `sqrt` can come out as -1e-7, so `pow(1.0 - z, 2.5)` must be
+   `pow(max(1.0 - z, 0.0), 2.5)`. `lint_glsl` accepts a base only when it can
+   prove it `>= 0` (non-negative literals, `abs`/`exp`/`length`/`sqrt`,
+   `max(.., >= 0)`, `clamp(.., >= 0, ..)`, or a variable only ever assigned one
+   of those), and a base that can be 0 only with a positive constant exponent.
 2. **Precision line first.** Start every shader with `precision highp float;`
    and never include `#version`.
 3. **Premultiplied alpha.** Write premultiplied colour to `gl_FragColor`.

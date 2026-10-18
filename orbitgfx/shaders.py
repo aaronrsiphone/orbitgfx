@@ -10,7 +10,10 @@ u_sprite_size, u_scale, u_offset. Everything else is set by GlobeView.
 
 Rules that keep shaders working on iOS (see lint_glsl):
   * `precision highp float;` first line.
-  * never pow(x, y) with x < 0 (undefined; NaN on Apple GPUs) -- square with x*x.
+  * pow(x, y) is exp2(y * log2(x)): undefined for x < 0, and for x == 0 with y <= 0.
+    Multiply small integer powers out (x * x * x); clamp other bases first,
+    pow(max(x, 0.0), y). Mind rounding: 1.0 - z with z a cosine or a sqrt can be
+    -1e-7 (sqrt(1.0) need not be exactly 1 on every GPU).
   * no dynamic indexing of uniform arrays; use one uniform per slot.
   * output premultiplied alpha in gl_FragColor.
 """
@@ -246,7 +249,7 @@ void main() {
 #ifdef LIGHTS
         col += LIGHT * lights * dark * 1.35 * (1.0 - 0.75 * cl);
 #endif
-        col += vec3(0.20, 0.55, 1.0) * 0.38 * pow(1.0 - z, 2.5) * (0.20 + 0.80 * day);
+        col += vec3(0.20, 0.55, 1.0) * 0.38 * pow(max(1.0 - z, 0.0), 2.5) * (0.20 + 0.80 * day);
 
 #ifdef AURORA
         vec3 mp = vec3(0.0478, -0.1540, 0.9869);
@@ -366,18 +369,127 @@ def build_globe_shader(features=None, palette=None):
     return head + '\n' + defines + rest
 
 
+_NUM = r'(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?'
+_NONNEG_CALLS = ('abs', 'exp', 'exp2', 'length', 'distance', 'sqrt', 'inversesqrt')
+
+
+def _call_args(text, i):
+    """Arguments of the call whose '(' is at text[i], split at top-level commas,
+    and the index after the matching ')' (None if unbalanced on this text)."""
+    depth, args, start = 0, [], i + 1
+    for j in range(i, len(text)):
+        ch = text[j]
+        if ch == '(':
+            depth += 1
+        elif ch == ')':
+            depth -= 1
+            if depth == 0:
+                args.append(text[start:j].strip())
+                return args, j + 1
+        elif ch == ',' and depth == 1:
+            args.append(text[start:j].strip())
+            start = j + 1
+    return None, None
+
+
+def _strip_parens(e):
+    e = e.strip()
+    while e.startswith('('):
+        args, end = _call_args(e, 0)
+        if args is None or end != len(e) or len(args) != 1:
+            break
+        e = args[0]
+    return e
+
+
+def _const(e):
+    """Value of a numeric literal expression (vecN(...) of one), else None."""
+    e = _strip_parens(e)
+    m = re.match(r'^(?:vec[234]|float)\s*\((.*)\)$', e)
+    if m:
+        args, end = _call_args(e, e.index('('))
+        if args is None or end != len(e):
+            return None
+        vals = [_const(a) for a in args]
+        return None if None in vals else min(vals)
+    if not re.match(r'^[\d\s.eE+\-*/()]+$', e):
+        return None
+    try:
+        return float(eval(e, {'__builtins__': {}}, {}))
+    except Exception:
+        return None
+
+
+def _sign(e, known):
+    """'pos' (> 0), 'nonneg' (>= 0) or None (unknown) for a GLSL expression."""
+    e = _strip_parens(e)
+    c = _const(e)
+    if c is not None:
+        return 'pos' if c > 0 else 'nonneg' if c == 0 else None
+    if re.match(r'^\w+$', e):
+        return known.get(e)
+    m = re.match(r'^(\w+)\s*\(', e)
+    if not m:
+        return None
+    args, end = _call_args(e, m.end() - 1)
+    if args is None or end != len(e):
+        return None
+    name = m.group(1)
+    if name == 'exp' or name == 'exp2':
+        return 'pos'
+    if name in _NONNEG_CALLS:
+        return 'nonneg'
+    if name == 'max':                          # max(a, b) >= max(sign(a), sign(b))
+        signs = [_sign(a, known) for a in args]
+        return 'pos' if 'pos' in signs else 'nonneg' if 'nonneg' in signs else None
+    if name == 'clamp' and len(args) == 3:     # clamp(a, lo, hi) >= lo
+        return _sign(args[1], known)
+    return None
+
+
+def _nonneg_vars(src):
+    """Variables every assignment of which is provably >= 0 (or > 0)."""
+    assigns = {}
+    for m in re.finditer(r'(?:\b(?:float|vec[234])\s+)?\b([A-Za-z_]\w*)\s*([+\-*/]?)=(?!=)\s*([^;]+);', src):
+        assigns.setdefault(m.group(1), []).append((m.group(2), m.group(3)))
+    known = {}
+    for _ in range(3):                         # chains: a = max(..); b = sqrt(a)
+        for name, items in assigns.items():
+            signs = [None if op else _sign(expr, known) for op, expr in items]
+            known[name] = ('pos' if all(s == 'pos' for s in signs) else
+                           'nonneg' if all(s in ('pos', 'nonneg') for s in signs) else None)
+    return {k: v for k, v in known.items() if v}
+
+
 def lint_glsl(src):
-    """Cheap static checks for GLSL ES 1.0 hazards on iOS. Returns warnings."""
+    """Cheap static checks for GLSL ES 1.0 hazards on iOS. Returns warnings.
+
+    pow(x, y): the base must be provably >= 0 (a non-negative literal, abs/exp/
+    length/sqrt, max(.., >= 0), clamp(.., >= 0, ..), or a variable only ever assigned
+    one of those), and when it can be 0 the exponent must be a positive constant.
+    `1.0 - z` is not provably >= 0 even when z is a cosine: use max(1.0 - z, 0.0).
+    """
     warn = []
     lines = src.splitlines()
     first = next((l.strip() for l in lines if l.strip()), '')
     if not first.startswith('precision'):
         warn.append('first statement should be `precision highp float;`')
-    safe = re.compile(r'^\s*(max\(|abs\(|clamp\(|exp\(|1\.0\s*-\s*z\b|nh\b|length\()')
+    known = _nonneg_vars(re.sub(r'//[^\n]*', '', src))
     for i, line in enumerate(lines, 1):
-        for m in re.finditer(r'\bpow\(([^,]+),', line):
-            if not safe.match(m.group(1)):
-                warn.append('line %d: pow(%s, ...) -- base must be >= 0 on iOS' % (i, m.group(1).strip()))
+        code = line.split('//', 1)[0]
+        for m in re.finditer(r'\bpow\s*\(', code):
+            args, _ = _call_args(code, m.end() - 1)
+            if args is None or len(args) != 2:
+                warn.append('line %d: pow(...) spans lines; keep it on one line for lint_glsl' % i)
+                continue
+            base, ex = args
+            sb = _sign(base, known)
+            if sb is None:
+                warn.append('line %d: pow(%s, ...) -- base must be >= 0 on iOS: '
+                            'multiply out or pow(max(x, 0.0), y)' % (i, base))
+            elif sb == 'nonneg' and _sign(ex, {}) != 'pos':
+                warn.append('line %d: pow(%s, %s) -- base can be 0, so the exponent must be '
+                            'a positive constant' % (i, base, ex))
         if re.search(r'\b(texture2DLod|textureLod|texture\()', line):
             warn.append('line %d: not available in GLSL ES 1.0 fragment shaders' % i)
         if re.search(r'#version', line):
@@ -1693,7 +1805,7 @@ void main() {
 #ifdef LIGHTS
         col += LIGHT * lights * dark * 1.35 * (1.0 - 0.75 * cl);
 #endif
-        col += vec3(0.20, 0.55, 1.0) * 0.38 * pow(1.0 - z, 2.5) * (0.20 + 0.80 * day);
+        col += vec3(0.20, 0.55, 1.0) * 0.38 * pow(max(1.0 - z, 0.0), 2.5) * (0.20 + 0.80 * day);
 #ifdef AURORA
         vec3 mp = vec3(0.0478, -0.1540, 0.9869);
         float ga = acos(clamp(abs(dot(ne, mp)), 0.0, 1.0));

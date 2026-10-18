@@ -155,6 +155,33 @@ def test_shader_variants_lint():
     assert lint_glsl('void main(){ gl_FragColor = vec4(pow(x - 1.0, 2.0)); }')
 
 
+def test_lint_pow_bases():
+    """pow(x, y) is exp2(y log2 x): the base must be provably >= 0, and when it can be
+    0 the exponent must be positive. 1.0 - z is NOT safe, even for a cosine: rounding
+    (sqrt(1.0) on some GPUs, a normalised dot) can make it -1e-7, and one NaN pixel."""
+    from orbitgfx import lint_glsl
+    flagged = ('float y = pow(1.0 - z, 2.5);',
+               'float y = pow(max(x, -1.0), 2.0);',            # max with a negative floor
+               'float y = pow(max(x, 0.0), e);',               # 0 ^ (e <= 0) undefined
+               'float y = pow(max(a, 0.0), 0.0);',
+               'float y = pow(nh, 40.0);',                     # unknown variable
+               'float nh = max(d, 0.0); nh -= 0.5; float y = pow(nh, 4.0);',
+               'float y = pow(x - 1.0, 2.0);')
+    clean = ('float y = pow(max(1.0 - z, 0.0), 2.5);',
+             'vec3 y = pow(max(c, vec3(0.0)), vec3(2.2));',
+             'vec3 y = pow(clamp(l, 0.0, 1.0), vec3(1.0 / 2.2));',
+             'vec3 y = pow(max(T, vec3(1e-6)), vec3(clamp(g / h, 0.0, 1.0)));',  # base > 0
+             'float nh = max(dot(a, b), 0.0); float y = pow(nh, 40.0);',
+             'float y = pow(abs(sin(t)), 3.0);',
+             'float y = 1.0;  // a comment is not code: pow(-1.0, 0.5)')
+    for body in flagged:
+        w = [x for x in lint_glsl('precision highp float;\n%s\ngl_FragColor' % body) if 'pow' in x]
+        assert w, body
+    for body in clean:
+        w = [x for x in lint_glsl('precision highp float;\n%s\ngl_FragColor' % body) if 'pow' in x]
+        assert not w, (body, w)
+
+
 @gpu
 def test_shader_variants_compile():
     """Desktop GLSL 120 compile (not Pythonista's compiler: that needs the device)."""

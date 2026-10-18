@@ -45,6 +45,9 @@ def test_device_check_quick_stages():
     assert os.path.exists(s.zip_path)
     found = device_report.findings(R)
     assert not [f for f in found if f.startswith(('LIFECYCLE', 'CAPTURE', 'GPU MATHS', 'STAGE'))], found
+    # Mesa: pow(negative, 5.0) is undefined (NaN), pow(negative, 2.0) is rewritten as x * x
+    assert [f for f in found if f.startswith('INFO GPU MATHS pow(x, 5)') and 'not x^5' in f], found
+    assert [f for f in found if f.startswith('INFO GPU MATHS pow(x, 2)') and 'equals x^2' in f], found
     src = device_report.Source(s.zip_path)
     assert src.report['format'] == DC.VERSION
     return {p['name']: p.get('max_err') for p in gm['probes']}

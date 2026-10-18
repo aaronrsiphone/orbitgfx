@@ -102,12 +102,21 @@ def findings(R):
         elif p.get('ok') is False:
             out.append('GPU MATHS %s: max error %.2g at x=%.3f (tolerance %.2g)'
                        % (p['name'], p['max_err'], p['at_x'], p['tol']))
-        elif p['name'] == 'pow(x, 2)' and p.get('values'):
+        elif p['name'] in ('pow(x, 5)', 'pow(x, 2)') and p.get('values'):
             xs, vs = np.array(p['xs']), np.array(p['values'])
             neg = xs < 0
-            if np.abs(vs[neg] - xs[neg] ** 2).max() > 0.01:
-                out.append('GPU MATHS pow(x, 2) for x < 0 gives %s, not x^2 (README rule 1 holds here)'
-                           % vs[neg].round(3).tolist())
+            k = 5 if '5' in p['name'] else 2
+            if np.abs(vs[neg] - xs[neg] ** k).max() > 0.01:
+                out.append('INFO GPU MATHS %s for x < 0 gives %s, not x^%d: undefined here as the '
+                           'spec says (README rule 1)' % (p['name'], vs[neg].round(3).tolist(), k))
+            else:
+                out.append('INFO GPU MATHS %s for x < 0 equals x^%d here (rewritten or defined by this '
+                           'driver; still undefined by the spec, keep the rule)' % (p['name'], k))
+        elif p['name'].startswith('1 - ') and p.get('values'):
+            lo = min(p['values'])
+            if lo < -1e-9:
+                out.append('INFO GPU MATHS %s rounds to %.2g (< 0) here: pow(1.0 - z, y) would be NaN; '
+                           'the max(.., 0.0) clamps are needed' % (p['name'], lo))
     vis = st.get('gpu_math', {}).get('nan_visible', {})
     if vis and not any(vis.values()):
         out.append('NAN DETECTION: shaders on this device cannot see NaNs (both tests folded '
