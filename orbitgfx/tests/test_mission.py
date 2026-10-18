@@ -1,0 +1,163 @@
+"""End-to-end checks for orbitgfx + the sandbox, using examples/mission_control.py.
+
+    python -m orbitgfx.tests.test_mission       # or: pytest --pyargs orbitgfx.tests
+Writes PNGs to orbitgfx/tests/out/. Pixel regression runs if tests/baseline/*.png exist.
+Desktop only (needs the sandbox's moderngl + skia).
+"""
+import math
+import os
+import sys
+import warnings
+
+import numpy as np
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+PKG = os.path.dirname(HERE)
+if __package__ in (None, ''):          # also runnable as a plain script
+    sys.path.insert(0, os.path.dirname(PKG))
+from orbitgfx.sandbox.runner import Runner  # noqa: E402
+import scene  # noqa: E402  (the sandbox shim, installed by the runner)
+
+APP = os.path.join(PKG, 'examples', 'mission_control.py')
+OUT = os.path.join(HERE, 'out')
+BASE = os.path.join(HERE, 'baseline')
+EPOCH = 1792188000.0          # 2026-10-16 ~22:00 UTC, fixed for reproducibility
+
+
+def fixed_epoch(mod):
+    mod.EPOCH_UNIX = EPOCH
+
+
+def make(**kw):
+    os.makedirs(OUT, exist_ok=True)
+    return Runner(APP, 'Mission', size=(390, 844), before_setup=fixed_epoch, **kw)
+
+
+def hold_at(s, met):
+    s.met0 = s.met = met
+    s.speed_idx = 0
+    s.wall0 = __import__('time').monotonic()
+    s.last_hud = -1.0
+
+
+def test_physics():
+    with make() as r:
+        s = r.scene
+        assert s.edrift < 1e-7 and s.hdrift < 1e-7
+        n = 2 * math.pi / s.period
+        a = 6378.137 + 500.0
+        theory = -1.5 * n * 1.08262668e-3 * (6378.137 / a) ** 2 * math.cos(math.radians(51.6))
+        theory = math.degrees(theory) * 86400
+        assert abs(s.raan_rate - theory) < 0.02, (s.raan_rate, theory)
+        assert s.passes and s.eclipses
+
+
+def test_frame_loop_and_touches():
+    """The exact interactions that crashed on device before."""
+    with make() as r:
+        s = r.scene
+        r.advance(0.5)                                  # dt is now framework-owned and nonzero
+        gx, gy, gw, gh = s.globe
+        mx, my, mw, mh = s.map
+        g = (gx + gw / 2, gy + gh / 2)
+        speed0 = s.speed_idx
+        r.tap(*g); r.advance(0.4)                       # deferred single tap fires
+        assert s.speed_idx == (speed0 + 1) % 5
+        r.double_tap(*g); r.advance(0.4)
+        assert s.cam.follow and s.speed_idx == (speed0 + 1) % 5
+        az0 = s.cam.az
+        r.drag([(g[0] - 60, g[1]), (g[0] + 60, g[1])], duration=0.2)
+        assert not s.cam.follow and s.cam.az != az0
+        r.advance(0.5)                                  # inertia + decay without errors
+        r.pinch(g, 60, 150)
+        assert 2.0 < s.cam.zoom <= 5.0, s.cam.zoom
+        hold_at(s, s.met); r.frame()
+        met0 = s.met
+        r.drag([(mx + 40, my + mh / 2), (mx + mw - 40, my + mh / 2)], duration=0.3)
+        assert s.met > met0 + 0.5 * s.period
+        assert not s.touches                            # framework dict cleaned up
+        r.advance(0.2)
+        r.render(os.path.join(OUT, 'after_gestures.png'))
+
+
+def test_sandbox_blocks_scene_collisions():
+    import orbitgfx.safety as safety
+
+    class Bad(scene.Scene):
+        def setup(self):
+            self.dt = 0.5
+            self.touches = {}
+
+    hits = {h[1] for h in safety.collisions(Bad)}
+    assert {'dt', 'touches'} <= hits, hits
+    try:
+        Bad().setup()
+    except scene.SandboxError:
+        pass
+    else:
+        raise AssertionError('sandbox should block self.dt = ...')
+
+
+def test_shader_variants_and_lint():
+    from orbitgfx import FEATURES, build_globe_shader, lint_glsl
+    for feats in (FEATURES, (), ('ATMOSPHERE', 'CLOUDS'), [f for f in FEATURES if f != 'ORBIT']):
+        src = build_globe_shader(feats, palette={'CYAN': (1, 0, 0)})
+        assert not lint_glsl(src), lint_glsl(src)
+        scene.Shader(src)                                # compiles on the GL context
+    assert lint_glsl('void main(){ gl_FragColor = vec4(pow(x - 1.0, 2.0)); }')
+
+
+def _diff(a, b):
+    from PIL import Image
+    A = np.asarray(Image.open(a).convert('RGB'), int)
+    B = np.asarray(Image.open(b).convert('RGB'), int)
+    d = np.abs(A - B).max(axis=2)
+    return d, float((d > 8).mean())
+
+
+def test_regression_against_baseline():
+    if not os.path.isdir(BASE):
+        return
+    import time as _t
+    with make() as r:
+        s = r.scene
+        sys.modules[type(s).__module__].GLOBE_SUN_GLYPH = True     # the 1.x frames had it
+        shots = {}
+        t = s.passes[0][0] + 120
+        hold_at(s, 1151); s.update(); s._hud()
+        shots['f1.png'] = 1151
+        r.render(os.path.join(OUT, 'f1.png'), u_time=1151)
+        hold_at(s, t); s.update(); s._hud()
+        r.render(os.path.join(OUT, 'f2.png'), u_time=t)
+        e = s.eclipses[0][0] + 200
+        hold_at(s, e); s.update(); s._hud()
+        r.render(os.path.join(OUT, 'f3.png'), u_time=e)
+        hold_at(s, t)
+        from orbitgfx.astro import sun_dir
+        sun = sun_dir(s.jd0 + t / 86400.)
+        s.cam.az, s.cam.el, s.cam.zoom = math.atan2(sun[1], sun[0]) + 0.9, 0.35, 1.0
+        s.update(); s._hud()
+        r.render(os.path.join(OUT, 'day.png'), u_time=t)
+        s.cam.follow, s.cam.zoom = True, 2.6
+        for _ in range(400):
+            s.last_update = _t.monotonic() - 0.05
+            s.update()
+        s.cam.follow = False
+        s._hud()
+        r.render(os.path.join(OUT, 'track.png'), u_time=t)
+    report = []
+    for name in ('f1.png', 'f2.png', 'f3.png', 'day.png', 'track.png'):
+        b = os.path.join(BASE, name)
+        if os.path.exists(b):
+            d, frac = _diff(os.path.join(OUT, name), b)
+            report.append((name, int(d.max()), frac))
+            assert frac < 0.002, (name, frac)
+    return report
+
+
+if __name__ == '__main__':
+    warnings.simplefilter('always')
+    for name, fn in sorted(globals().items()):
+        if name.startswith('test_'):
+            res = fn()
+            print('PASS', name, res if res else '')
