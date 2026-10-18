@@ -186,17 +186,39 @@ def line(x1, y1, x2, y2):
 
 # ------------------------------------------------------------------ GPU
 _ctx = None
+_ctx_error = None
 
 
 def _gl():
-    global _ctx
+    global _ctx, _ctx_error
     if _ctx is None:
-        import moderngl
+        if _ctx_error is not None:
+            raise _ctx_error
         try:
-            _ctx = moderngl.create_standalone_context(backend='egl')
-        except Exception:
-            _ctx = moderngl.create_standalone_context()
+            import moderngl
+            try:
+                _ctx = moderngl.create_standalone_context(backend='egl')
+            except Exception:
+                _ctx = moderngl.create_standalone_context()
+        except Exception as e:
+            _ctx_error = e
+            raise
     return _ctx
+
+
+def gl_status():
+    """(True, '') when shaders really compile and render here, else (False, reason).
+
+    Sandbox only (not part of Pythonista). Without it a Shader still lints but
+    is not compiled: tests must skip or fail, never pass, on GPU checks.
+    """
+    try:
+        _gl()
+        return True, ''
+    except ImportError:
+        return False, 'moderngl not installed'
+    except Exception as e:
+        return False, 'no OpenGL context (%s)' % str(e).strip().splitlines()[-1]
 
 
 _VS = ('#version 120\nattribute vec2 in_pos; varying vec2 v_tex_coord;\n'
@@ -239,12 +261,17 @@ class Shader(object):
         self.src = src
         self.uniforms = {}
         self._prog = None
+        self.compiled = False       # sandbox only: False when there is no GL to compile with
         try:
             from orbitgfx.shaders import lint_glsl
             for w in lint_glsl(src):
                 warnings.warn('GLSL lint: ' + w)
         except ImportError:
             pass
+        ok, why = gl_status()
+        if not ok:
+            warnings.warn(why + ': shaders are NOT compiled and will not render')
+            return
         try:
             # one program per distinct source: llvmpipe programs with long loops are
             # large, and tests build hundreds of identical shaders
@@ -252,10 +279,9 @@ class Shader(object):
             if self._prog is None:
                 fs = '#version 120\n' + src.replace('precision highp float;', '')
                 self._prog = _PROGRAMS[src] = _gl().program(vertex_shader=_VS, fragment_shader=fs)
-        except ImportError:
-            warnings.warn('moderngl not installed: shaders will not render')
         except Exception as e:
             raise SandboxError('GLSL compile failed:\n%s' % e)
+        self.compiled = True
 
     def set_uniform(self, name, value):
         if isinstance(value, Texture):

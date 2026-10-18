@@ -3,7 +3,7 @@
 How to change the look, the physics and the cost of everything orbitgfx draws: the
 quality presets, the camera, the atmosphere, the surface, the water, the clouds, the
 offline weather simulation, eclipse lighting and refraction, colours, and the example
-apps. Every knob below exists in 2.0.0a15; defaults are the values shipped.
+apps. Every knob below exists in 2.0.0a17; defaults are the values shipped.
 
 Contents
 
@@ -237,9 +237,14 @@ The atmosphere is Bruneton/Hillaire-style single scattering with a baked transmi
 table (`luts.py`), real scale heights (Rayleigh 8 km, aerosol 1.2 km, ozone layer at
 25 km), drawn thicker than real so it reads at phone scale.
 
+Shader units: positions are in drawn Earth radii; one unit is `u_atm.y` =
+6378.137 / `atmo_scale` km. Every height in km comes from `altitudeKm(r)` (refraction,
+the sun's disc, the airglow), so a known physical altitude means the same air whatever
+`atmo_scale` is. The orbit, spacecraft and their eclipse are true scale (`RE_KM`).
+
 | Knob | Default | Effect |
 | --- | --- | --- |
-| `GlobeView(atmo_scale=)` / `views.ATMO_SCALE` | 1.5 | thickness of the drawn atmosphere x real. 1.0 is true scale (thin, almost invisible from orbit). The optics stay in real km, only the geometry is stretched. Ground views use 1.0 |
+| `GlobeView(atmo_scale=)` / `views.ATMO_SCALE` | 1.5 | thickness of the drawn atmosphere x real. 1.0 is true scale (thin, almost invisible from orbit). Drawn as a real 100 km atmosphere on an `atmo_scale` x smaller planet: vertical extinction stays in real km, but grazing paths see the tighter curvature and cross less air (tangent transmittance at the ground, R/G/B: 0.106/0.0095/0.00005 at 1.0, 0.160/0.022/0.0003 at 1.5), so the limb is brighter and less red than real. A visual exaggeration; 1.0 is the physical geometry. Ground views use 1.0 |
 | `GlobeView(haze=)` / `views.HAZE` | 0.10 | fraction of the air light kept when looking straight down. Satellite imagery removes most of it ("Rayleigh correction"); 1.0 is the fully physical, hazy blue view. It always ramps back to full toward the limb |
 | `views.MS_GAIN` | 0.10 | multiple-scattering ambient: how much light the air gets from the rest of the sky. 0.25 washes the disc out; 0 makes twilight too dark |
 | `atmo_samples` (preset) / `ATMO_N` define | 6-16 | accuracy of the integral; low values band at the terminator |
@@ -417,7 +422,11 @@ a pixel per 1.5 km.
 ## 11. The weather simulation (offline)
 
 `orbitgfx/weather.py` is a small general-circulation model that is run once, offline;
-the phone only plays back its frames.
+the phone only plays back its frames. Only its dynamical core is a governing-equation
+model: a two-layer quasi-geostrophic midlatitude circulation. Moisture and clouds are
+parameterised proxies calibrated to look right, tropical cyclones are scripted artwork,
+and the film is a 4-day seamless loop of one season, not observations. The tiers and
+what each is checked against are in VALIDATION.md.
 
 ### Making a film
 
@@ -473,7 +482,10 @@ temperature profile.
 Genesis about 1.7 attempts per day over water warmer than 27.8 C; steering by the model
 winds plus beta drift; intensity toward a potential intensity from SST
 (`(sst - 25.5) / 2.5`), decay over land; drawn as spiral bands, a central dense overcast
-and an eye.
+and an eye. The storms are procedural cloud art: they are stamped into the convective
+cloud field (`cc = max(cc, storm)`) and never feed back into the QG streamfunctions,
+PV, winds or moisture. A hurricane here is not a resolved vortex, and QG is weakest
+in the tropics anyway.
 
 ---
 
@@ -492,7 +504,7 @@ colour, and toward orange where red light remains).
 
 | Where | Model | Knobs |
 | --- | --- | --- |
-| Sunlight near the ground (ground, clouds, sky) | the sun's elevation lifted by Saemundsson's formula, 0.48 deg for a sun on the true horizon, 0.1 deg at 10 deg, scaled by air density at the point (8 km scale height) | `refrDeg()` |
+| Sunlight near the ground (ground, clouds, sky) | the sun's elevation lifted by Saemundsson's formula (input: TRUE elevation), 0.48 deg for a sun on the true horizon, 0.1 deg at 10 deg (the familiar 0.57 deg is Bennett's value for an object seen on the horizon), scaled by air density at the point's physical height, `altitudeKm()` (8 km scale height) | `refrDeg()` |
 | The sun's disc from the ground | lifted by the same amount and squashed vertically (the lower edge lifted more) | disc drawn 2x true size: `0.0090` rad radius in the disc code |
 | Eclipses from orbit | the limb is a lens: a ray grazing at height h is bent by 0.0203 rad x exp(-h / 7.3 km) (1.16 deg at the surface); the arriving ray is found by bisection, and its light is spread by the vertical squeeze (refractive dimming). Dim red sunlight lingers ~15 s past geometric shadow | `limbBend()` |
 

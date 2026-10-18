@@ -182,6 +182,30 @@ def _primer_texture():
     return _PRIMER_TEX[0]
 
 
+def look_at(eye, look):
+    """Rows right, up, toward the viewer (= -viewing direction) of a camera at
+    `eye` looking at `look` (any length unit, ECI).
+
+    Screen-up follows the local vertical at the eye. Looking straight along it
+    (down at the Earth's centre, or straight up) leaves no horizon to level
+    with, so up then comes from the coordinate axis least parallel to the view.
+    """
+    if look is None:
+        raise ValueError('Camera.eye needs Camera.look')
+    e = np.asarray(eye, float)
+    f = e - np.asarray(look, float)
+    n = float(np.linalg.norm(f))
+    if not (math.isfinite(n) and n > 1e-12):
+        raise ValueError('Camera.eye and Camera.look must be finite and distinct')
+    f = f / n
+    ne = float(np.linalg.norm(e))
+    r = np.cross(e / ne, f) if ne > 1e-12 else np.zeros(3)
+    if np.linalg.norm(r) < 1e-6:                    # radial view: no local horizon
+        r = np.cross(np.eye(3)[int(np.argmin(np.abs(f)))], f)
+    r = r / np.linalg.norm(r)
+    return np.array((r, np.cross(f, r), f))
+
+
 class Camera(object):
     """Orbit camera: azimuth / elevation about Earth's centre.
 
@@ -214,17 +238,11 @@ class Camera(object):
         self.held = False
         self._last_move = 0.0
         self._pinch0 = None
+        self._astro_eye = False     # eye/look were placed by set_astronaut, not by the app
 
     def matrix(self):
         if self.eye is not None:
-            # look-at basis: rows right, up, toward the viewer (= -viewing direction)
-            e = np.asarray(self.eye, float)
-            f = e - np.asarray(self.look, float)
-            f /= np.linalg.norm(f)
-            up = e / np.linalg.norm(e)                      # the local vertical at the eye
-            r = np.cross(up, f)
-            r /= np.linalg.norm(r)
-            return np.array((r, np.cross(f, r), f))
+            return look_at(self.eye, self.look)
         ca, sa = math.cos(self.az), math.sin(self.az)
         ce, se = math.cos(self.el), math.sin(self.el)
         return np.array(((-sa, ca, 0.0), (-se * ca, -se * sa, ce), (ce * ca, ce * sa, se)))
@@ -281,10 +299,12 @@ class Camera(object):
         self.eye = p + r * above - v * back
         self.look = p + v * ahead - r * down
         self.fov_deg = self.astro_fov
+        self._astro_eye = True
 
     def leave_astronaut(self):
         self.eye = self.look = None
         self.fov_deg = None
+        self._astro_eye = False
 
     def step(self, dt, target=None, vel=None):
         """Advance inertia, or ease toward `target` (ECI vector) in chase mode; in
@@ -292,7 +312,8 @@ class Camera(object):
         if self.follow and self.astro and target is not None and vel is not None:
             self.set_astronaut(target, vel)
             return
-        if self.eye is not None:
+        if self._astro_eye:
+            # only undo what astronaut mode placed: an app's own eye/look camera stays
             self.leave_astronaut()
         if self.follow and target is not None:
             p = np.asarray(target, float)

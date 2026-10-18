@@ -7,7 +7,7 @@ screenshots.
 ```
 orbitgfx/                     drop this one folder into site-packages
   __init__.py                 import orbitgfx  (works on device and desktop)
-  README.md, LICENSE
+  README.md, TUNING.md, VALIDATION.md, LICENSE
   views.py                    GlobeView, NightMapOverlay, Camera
   shaders.py                  globe shader template (feature flags + palette), map shader, lint_glsl
   earth.py                    bake / cache the Earth data texture (land, coast, city lights)
@@ -22,8 +22,12 @@ orbitgfx/                     drop this one folder into site-packages
   sandbox/                    desktop only, never imported on device
     runner.py, render.py      Runner API and the screenshot CLI
     shim/                     emulated scene + ui (put on sys.path only on desktop)
-  tests/                      test_mission.py + baseline renders
+  tests/                      test_geometry.py (no GPU), test_mission.py, test_raycore.py,
+                              baseline renders
 ```
+
+How far to trust the physics (verified, approximate, artistic): see
+[VALIDATION.md](VALIDATION.md).
 
 Tuning the look, the physics and the cost of everything: see [TUNING.md](TUNING.md).
 
@@ -123,7 +127,11 @@ Camera(fov_deg=50, distance=1.2)                 # or set the projection on the 
   fraction kept looking straight down; it ramps to the full physical value at
   the limb. `haze=1.0` is the fully physical, hazy view.
 - `atmo_scale=` (default 1.5) draws the atmosphere 1.5x thicker than real so
-  it reads at phone scale; the optics stay in real km.
+  it reads at phone scale. It is drawn as a real 100 km atmosphere on a planet
+  1.5x smaller, so vertical extinction stays in real km but the curvature is
+  not: grazing (limb and horizon) paths cross less air and transmit more. It
+  is a visual exaggeration, not an optically invariant stretch; use
+  `atmo_scale=1` for the physical geometry (see VALIDATION.md).
 - City lights and the coastline stroke are drawn at full resolution even in
   `MED` / `HIGH`.
 - The `TONEMAP` feature tone-maps the 1.x colours without `SCATTER`.
@@ -205,7 +213,11 @@ Camera(fov_deg=50, distance=1.2)                 # or set the projection on the 
     looking ahead at the horizon (70 degree FOV pinhole; ray presets only).
     `cam.set_astronaut(sat_km, vel, back=, above=, ahead=, down=)` places it
     directly; any drag leaves the mode. `Camera.eye` / `Camera.look` (Earth
-    radii, ECI) are a general look-at camera. The ring and marker are hidden
+    radii, ECI) are a general look-at camera: screen-up follows the local
+    vertical, and a view straight along it (nadir or zenith) falls back to a
+    fixed axis instead of producing NaNs; `eye == look` or a missing `look`
+    raises `ValueError`. `cam.step()` only clears an eye that astronaut mode
+    placed, never one the app set. The ring and marker are hidden
     while riding the spacecraft. In `examples/mission_control.py` (ray
     qualities) double tap cycles FREE, TRACK, ASTRO.
 - Surface (2.0 phase 5, every ray preset): real imagery instead of the 1.x
@@ -297,8 +309,10 @@ installed on your path:
 pip install numpy pillow moderngl skia-python
 python -m orbitgfx.sandbox.render orbitgfx/examples/mission_control.py Mission -o shot.png \
     --unix 1792188000 --exec "s.met0 = s.met = 4500; s.speed_idx = 0"
+python -m orbitgfx.tests.test_geometry         # numerics only: camera, WGS84, J2, RK45, QG
 python -m orbitgfx.tests.test_mission
 python -m orbitgfx.tests.test_raycore           # 2.0: ray core vs LEGACY, NaN scan, presets
+pytest --pyargs orbitgfx.tests                  # all of the above
 python -m orbitgfx.sandbox.previews -o sheet.png  # presets x sun geometries contact sheet
 ```
 
@@ -313,7 +327,12 @@ with Runner(orbitgfx.EXAMPLES_DIR + '/globe_demo.py', 'Demo') as r:
   context (headless EGL; works with Mesa llvmpipe, no GPU needed), with
   Pythonista's built-ins wired up (`v_tex_coord`, `u_texture`, `u_time`,
   `u_sprite_size`, `u_scale`). Compile errors are raised when `Shader()` is
-  created, and `lint_glsl` warnings are printed.
+  created, and `lint_glsl` warnings are printed. Without a GL context (no
+  moderngl, no EGL / display) a `Shader` is only linted and warns;
+  `scene.gl_status()` and `Shader.compiled` say so, and the tests that compile
+  or render are reported SKIPPED, never passed. Set `ORBITGFX_REQUIRE_GPU=1`
+  (release CI) to make those skips failures. A desktop compile is GLSL 120 on
+  Mesa, not Pythonista's compiler: on-device compilation is its own check.
 - **Classic drawing.** Skia renders `draw()` with y-up at 3x, matching an
   iPhone.
 - **Framework bookkeeping is emulated.** The Runner updates `t`, `dt` and

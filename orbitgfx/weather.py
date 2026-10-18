@@ -35,6 +35,21 @@ Moisture and cloud (column budgets, parameterised):
 
 Units: Earth radius 1, time in days, winds in radians per day (1 rad/day =
 73.7 m/s).
+
+What this is (validation tiers, see VALIDATION.md):
+  A  QG equations and discretisation (Model.pv / Model.invert, advection):
+     verified numerically (inversion round trip, constant tracer).
+  B  forcing and dissipation closures (relaxation, friction, drag, polar
+     filter): prescribed, tuned for a realistic-looking jet.
+  C  moisture proxies (relative saturation curve, normalised ascent, clipping):
+     not quantitative humidity or cloud water.
+  D  cloud categories and coverage, calibrated by percentile (CLEAR_PCT /
+     OVERCAST_PCT) to a target clear/overcast share: visual.
+  E  tropical cyclones (Climate._cyclones): seeded, scripted cloud artwork that
+     does not touch the dynamics.
+  F  the baked film: 4-day seamless loop of one season, cross-faded at the ends.
+It is a QG midlatitude circulation plus empirical tropical convection and storm
+artwork, not a primitive-equation atmosphere or a forecast.
 """
 import math
 
@@ -469,7 +484,10 @@ class Climate(object):
     def _cyclones(self, dt, T_air):
         """Genesis over warm water, steering + beta drift, intensity toward an SST
         potential intensity, decay over land / cold water; imprint spiral bands,
-        central dense overcast and eye into the convective cloud field."""
+        central dense overcast and eye into the convective cloud field.
+
+        Procedural artwork (tier E): only self.cc changes. The storms do not
+        modify the QG streamfunctions, PV, winds, temperature or vapour."""
         g, m = self.g, self.model
         rng = self._tc_rng
         # genesis: attempts ~1.7 per day, only over water warmer than 27.8 C

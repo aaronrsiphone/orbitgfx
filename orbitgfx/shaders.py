@@ -505,9 +505,21 @@ bool inShadow(vec3 c) {
     float d = dot(c, u_sun);
     return d < 0.0 && length(c - d * u_sun) < 1.0;
 }
+// Units: positions are in drawn Earth radii (the Earth is radius 1). With SCATTER one
+// unit is u_atm.y = 6378.137 / atmo_scale km (the atmosphere's drawn planet); without it
+// the drawing is true scale. Convert heights with altitudeKm(), never a literal radius.
+// The orbit, spacecraft and their eclipse (sunVis) are always true scale: RE_KM.
+#define RE_KM 6378.137
+#ifdef SCATTER
+#define KM_PER_UNIT u_atm.y
+#else
+#define KM_PER_UNIT RE_KM
+#endif
+float altitudeKm(float r) { return (r - 1.0) * KM_PER_UNIT; }
 #ifdef REFRACTION
 // Astronomical refraction (Saemundsson 1986, standard air): how much the air lifts an
-// object at true elevation e (degrees), in degrees; 0.57 deg at the horizon, 0.1 at 9 deg.
+// object at TRUE elevation e (degrees), in degrees; 0.48 deg for e = 0 (the familiar
+// 0.57 deg is Bennett's value for an object seen ON the horizon), 0.1 deg at 9 deg.
 // Scaled by the air density at the observer's height h (km).
 float refrDeg(float e, float h) {
     float a = radians(max(e, -2.0) + 10.3 / (max(e, -2.0) + 5.11));
@@ -515,7 +527,7 @@ float refrDeg(float e, float h) {
 }
 // sine of the elevation the sun appears at, seen from radius r with the true value s
 float refrSin(float r, float s) {
-    float h = (r - 1.0) * 6371.0;
+    float h = altitudeKm(r);
     if (h > 40.0) return s;
     float e = degrees(asin(clamp(s, -1.0, 1.0)));
     return sin(radians(e + refrDeg(e, h)));
@@ -540,9 +552,9 @@ vec3 sunVis(vec3 p) {
     // the air is a lens: a ray grazing at height h is bent by limbBend(h), so sunlight
     // still arrives after the Sun has set geometrically, from a lower, redder, thinner
     // slice of air, and spread out (the vertical squeeze dims it)
-    float L = sqrt(max(r * r - 1.0, 0.0)) * 6378.137;      // km from p to the limb
+    float L = sqrt(max(r * r - 1.0, 0.0)) * RE_KM;         // km from p to the limb
     float d = rho - th;                                     // Sun's depth below the limb (rad)
-    float h = max((b - 1.0) * 6378.137, 0.0);
+    float h = max((b - 1.0) * RE_KM, 0.0);
     if (h < 120.0) {
         // the ray that actually arrives: tangent height h where its bend makes up the
         // Sun's depth, bend(h) - h / L = d (continuous with the straight ray higher up)
@@ -558,7 +570,7 @@ vec3 sunVis(vec3 p) {
 #else
     float x = clamp((th - rho) / 0.004654, -1.0, 1.0);      // Sun's centre past the limb, in solar radii
     float geo = 0.5 + (x * sqrt(1.0 - x * x) + asin(x)) / PI;
-    float h = max((b - 1.0) * 6378.137, 0.0);               // tangent height of the grazing ray, km
+    float h = max((b - 1.0) * RE_KM, 0.0);                  // tangent height of the grazing ray, km
 #endif
     vec3 tau = vec3(3.29, 7.68, 18.7) * exp(-h / 8.0) + 0.97 * exp(-h / 1.2);
     return geo * exp(-tau);
@@ -1340,7 +1352,7 @@ void main() {
     }
     // airglow: thin 557.7 nm emission at ~95 km, seen edge-on at the night limb
     if (!hit) {
-        float hc = (rc - 1.0) * u_atm.y;
+        float hc = altitudeKm(rc);
         float gx = (hc - 95.0) / 6.0;
         // only visible where that air is in the Earth's shadow (by day sunlit air drowns it)
         float sx = dot(X, u_sun);
@@ -1378,7 +1390,7 @@ void main() {
 #ifdef REFRACTION
         // seen through the air: lifted, and squashed (the lower limb is lifted more)
         float et = degrees(asin(clamp(dot(u_sun, upo), -1.0, 1.0)));
-        float hk = (length(ro) - 1.0) * 6371.0;
+        float hk = altitudeKm(length(ro));
         float ea = et + refrDeg(et, hk);
         float sq = 1.0 + (refrDeg(et + 0.25, hk) - refrDeg(et - 0.25, hk)) / 0.5;   // d(apparent)/d(true)
         vec3 hz = normalize(u_sun - upo * dot(u_sun, upo));
@@ -1473,7 +1485,8 @@ void main() {
         float hx = texture2D(u_aux, tuv + vec2(tst.x, 0.0)).r;
         float hy = texture2D(u_aux, tuv + vec2(0.0, tst.y)).r;
         float clat = max(cos(lat), 0.05);
-        // km per texel: east 2 pi RE cos(lat) / 2048, north pi RE / 1024 (RE 6371 km)
+        // km per texel: east 2 pi RE cos(lat) / 2048, north pi RE / 1024 (true-scale
+        // surface, mean radius 6371 km: texel size is not affected by atmo_scale)
         vec2 slope = vec2((hx * hx - hc) / (19.55 * clat), (hy * hy - hc) / 19.55) * 9.0 * RELIEF_GAIN * land;
         vec3 ee = normalize(vec3(-ne.y, ne.x, 0.0) + vec3(1e-6, 0.0, 0.0));
         vec3 nn = cross(ne, ee);

@@ -11,8 +11,16 @@ TOUCH
   drag map          scrub mission time (works while paused)
 
 Physics / ops: RK45 with J2, real epoch (GMST + solar ephemeris), cylindrical
-eclipse model, AOS/LOS prediction, elevation, slant range, S-band Doppler,
-osculating elements with measured nodal regression, mission timeline.
+eclipse model, AOS/LOS prediction from WGS84 stations, elevation, slant range,
+S-band Doppler, osculating elements with measured nodal regression, mission
+timeline.
+
+Fidelity: an idealised demonstration, not an operational predictor. The orbit is
+two-body + J2 only (no drag, higher harmonics, Sun/Moon), the Earth's rotation
+is mean GMST, eclipses are a cylinder and the ground track, footprints and map
+are spherical. Contact and shadow times are approximate (seconds to tens of
+seconds); the solver's agreement with SciPy measures numerics, not real-world
+accuracy.
 """
 import math
 import os
@@ -32,9 +40,9 @@ from orbitgfx.coastlines import coastlines_xyz
 
 from orbitgfx import (Camera, Gestures, GlobeView, NightMapOverlay, cached_earth_image,
                       pil_texture, safety)
-from orbitgfx.astro import (C_KM_S, J2, MU, OMEGA_E, RE, eci_to_ecef, ecef_to_eci, gmst,
-                            hermite, horizon_angle, julian_date, latlon, llxyz,
-                            shadow_margin, small_circle, sun_dir, windows)
+from orbitgfx.astro import (C_KM_S, J2, MU, OMEGA_E, RE, eci_to_ecef, ecef_to_eci, elevation,
+                            geodetic_to_ecef, geodetic_up, gmst, hermite, horizon_angle,
+                            julian_date, latlon, shadow_margin, small_circle, sun_dir, windows)
 from orbitgfx.draw2d import MapRect, glow_dot, line, mix, panel, rgba, seam_segments, sun_glyph
 
 # ------------------------------------------------------------------ mission
@@ -47,7 +55,7 @@ POINTS = 2400
 EPOCH_UNIX = None           # None = launch "now"; or a fixed unix time
 ELEV_MASK = 5.0             # deg
 
-STATIONS = (                # name, lat, lon   (max 6: the shader has 6 slots)
+STATIONS = (                # name, WGS84 lat, lon (deg)   (max 6: the shader has 6 slots)
     ('KIRUNA',    67.86,   20.96),
     ('WALLOPS',   37.94,  -75.46),
     ('S.POINT',   19.01, -155.66),
@@ -215,15 +223,16 @@ class Mission(scene.Scene):
         self.earth_img = cached_earth_image(coasts, width=TEX_W, fill_land=FILL_LAND)
 
     def _load_stations(self):
+        # Stations sit on the WGS84 ellipsoid and see elevation from its normal; the
+        # mask ring on the map is the spherical approximation (drawing only).
         mask_ang = horizon_angle(RE + ALTITUDE, ELEV_MASK)
         self.stations = []
         for name, lat, lon in STATIONS[:6]:
-            s = np.array(llxyz(lon, lat))
-            rho = self.ecef - s
-            el = np.degrees(np.arcsin(rho @ (s / RE) / np.linalg.norm(rho, axis=1)))
+            s, up = geodetic_to_ecef(lat, lon), geodetic_up(lat, lon)
+            el = elevation(self.ecef - s, up)
             rl, ra = small_circle(lat, lon, mask_ang)
             self.stations.append({'name': name, 'lat': lat, 'lon': lon,
-                                  'ecef': s, 'el': el, 'ring': (rl, ra)})
+                                  'ecef': s, 'up': up, 'el': el, 'ring': (rl, ra)})
         self.passes = []
         for k, st in enumerate(self.stations):
             for a, b in windows(self.ts, st['el'], ELEV_MASK):
@@ -388,7 +397,7 @@ class Mission(scene.Scene):
         for k, st in enumerate(self.stations):
             rho = pe - st['ecef']
             rn = float(np.linalg.norm(rho))
-            el = math.degrees(math.asin(float(rho @ st['ecef']) / (RE * rn)))
+            el = float(elevation(rho, st['up']))
             if el > ELEV_MASK and (best is None or el > best[1]):
                 s = ecef_to_eci(st['ecef'], theta)
                 sv = OMEGA_E * np.array((-s[1], s[0], 0.0))
@@ -537,7 +546,7 @@ class Mission(scene.Scene):
 
     # ---------------------------------------------------------- frame
     def draw(self):
-        self.update()
+        # graphics only: Pythonista (and the sandbox) call update() once before each draw()
         w, h = self.size
         scene.no_stroke(); scene.fill(*rgba(BG)); scene.rect(0, 0, w, h)
         for x, y, c in self.star_px:

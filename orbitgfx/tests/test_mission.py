@@ -17,6 +17,7 @@ if __package__ in (None, ''):          # also runnable as a plain script
     sys.path.insert(0, os.path.dirname(PKG))
 from orbitgfx.sandbox.runner import Runner  # noqa: E402
 import scene  # noqa: E402  (the sandbox shim, installed by the runner)
+from orbitgfx.tests._gpu import gpu, run_all  # noqa: E402
 
 APP = os.path.join(PKG, 'examples', 'mission_control.py')
 OUT = os.path.join(HERE, 'out')
@@ -28,9 +29,18 @@ def fixed_epoch(mod):
     mod.EPOCH_UNIX = EPOCH
 
 
-def make(**kw):
+def spherical_stations(mod):
+    """1.x station geometry (sphere, radial vertical): the baseline frames were rendered
+    with it, and their HUD text and pass times depend on it."""
+    from orbitgfx.astro import RE, llxyz
+    fixed_epoch(mod)
+    mod.geodetic_to_ecef = lambda lat, lon, alt_km=0.0: np.array(llxyz(lon, lat))
+    mod.geodetic_up = lambda lat, lon: np.array(llxyz(lon, lat)) / RE
+
+
+def make(before_setup=fixed_epoch, **kw):
     os.makedirs(OUT, exist_ok=True)
-    return Runner(APP, 'Mission', size=(390, 844), before_setup=fixed_epoch, **kw)
+    return Runner(APP, 'Mission', size=(390, 844), before_setup=before_setup, **kw)
 
 
 def hold_at(s, met):
@@ -52,6 +62,39 @@ def test_physics():
         assert s.passes and s.eclipses
 
 
+def test_one_update_per_frame():
+    """Pythonista calls update() once before every draw(); draw() must not call it again."""
+    with make() as r:
+        s = r.scene
+        calls = []
+        orig = s.update
+        s.update = lambda: (calls.append(1), orig())[1]
+        r.advance(0.5)
+        assert len(calls) == r.frames, (len(calls), r.frames)
+        del calls[:]
+        s.draw()
+        assert not calls, 'draw() called update()'
+
+
+def test_ground_stations_wgs84():
+    """Stations sit on the WGS84 ellipsoid; pass elevations use its normal."""
+    from orbitgfx.astro import OMEGA_E, elevation, geodetic_to_ecef, geodetic_up
+    with make() as r:
+        s = r.scene
+        for st in s.stations:
+            assert np.allclose(st['ecef'], geodetic_to_ecef(st['lat'], st['lon']))
+            assert np.allclose(st['up'], geodetic_up(st['lat'], st['lon']))
+        st = s.stations[0]
+        assert np.allclose(st['el'], elevation(s.ecef - st['ecef'], st['up']))
+        # live link selection and the precomputed passes agree mid-pass
+        a, b, _, k = s.passes[0]
+        tm = 0.5 * (a + b)
+        p, v = s._sample(tm)
+        link = s._link(p, v, s.theta0 + OMEGA_E * tm)
+        assert link is not None and link[1] > 5.0, link
+
+
+@gpu(what='render')
 def test_frame_loop_and_touches():
     """The exact interactions that crashed on device before."""
     with make() as r:
@@ -98,13 +141,25 @@ def test_sandbox_blocks_scene_collisions():
         raise AssertionError('sandbox should block self.dt = ...')
 
 
-def test_shader_variants_and_lint():
-    from orbitgfx import FEATURES, build_globe_shader, lint_glsl
+def _legacy_variants():
+    from orbitgfx import FEATURES, build_globe_shader
     for feats in (FEATURES, (), ('ATMOSPHERE', 'CLOUDS'), [f for f in FEATURES if f != 'ORBIT']):
-        src = build_globe_shader(feats, palette={'CYAN': (1, 0, 0)})
+        yield build_globe_shader(feats, palette={'CYAN': (1, 0, 0)})
+
+
+def test_shader_variants_lint():
+    """Static text checks only; compiling is test_shader_variants_compile."""
+    from orbitgfx import lint_glsl
+    for src in _legacy_variants():
         assert not lint_glsl(src), lint_glsl(src)
-        scene.Shader(src)                                # compiles on the GL context
     assert lint_glsl('void main(){ gl_FragColor = vec4(pow(x - 1.0, 2.0)); }')
+
+
+@gpu
+def test_shader_variants_compile():
+    """Desktop GLSL 120 compile (not Pythonista's compiler: that needs the device)."""
+    for src in _legacy_variants():
+        assert scene.Shader(src).compiled
 
 
 def _diff(a, b):
@@ -115,11 +170,12 @@ def _diff(a, b):
     return d, float((d > 8).mean())
 
 
+@gpu(what='render')
 def test_regression_against_baseline():
     if not os.path.isdir(BASE):
         return
     import time as _t
-    with make() as r:
+    with make(spherical_stations) as r:
         s = r.scene
         sys.modules[type(s).__module__].GLOBE_SUN_GLYPH = True     # the 1.x frames had it
         shots = {}
@@ -157,7 +213,4 @@ def test_regression_against_baseline():
 
 if __name__ == '__main__':
     warnings.simplefilter('always')
-    for name, fn in sorted(globals().items()):
-        if name.startswith('test_'):
-            res = fn()
-            print('PASS', name, res if res else '')
+    run_all(globals())

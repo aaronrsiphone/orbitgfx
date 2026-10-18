@@ -1,3 +1,4 @@
 __pycache__/
 *.pyc
 .orbitgfx_cache/
+orbitgfx/tests/out/

@@ -22,6 +22,7 @@ from orbitgfx.astro import RE  # noqa: E402
 from orbitgfx.shaders import (FEATURES, PASSES, RAY_FEATURES, build_globe_shader,  # noqa: E402
                               build_ray_shader, lint_glsl)
 from orbitgfx.views import QUALITY, Camera, GlobeView  # noqa: E402
+from orbitgfx.tests._gpu import gpu, run_all  # noqa: E402
 
 OUT = os.path.join(HERE, 'out')
 PANEL = (10.0, 10.0, 410.0, 552.0)            # the iPhone 16 Pro Max portrait panel
@@ -125,6 +126,7 @@ POSES['chase2.6'] = dict(cam=Camera(az=math.atan2(_s[1], _s[0]) - 0.15,
 
 
 # --------------------------------------------------------------------------- tests
+@gpu(what='render')
 def test_legacy_pixel_identical():
     """tests/baseline was rendered by 1.x; LEGACY must match it exactly (max diff 0)."""
     from orbitgfx.tests import test_mission
@@ -133,19 +135,78 @@ def test_legacy_pixel_identical():
     return report
 
 
-def test_variants_lint_and_compile():
-    n = 0
+def _ray_variants():
     for pass_ in PASSES:
-        for feats in (None, RAY_FEATURES, (), ('ORBIT', 'SATELLITE'), ('ATMOSPHERE', 'TONEMAP')):
+        for feats in (None, RAY_FEATURES, (), ('ORBIT', 'SATELLITE'), ('ATMOSPHERE', 'TONEMAP'),
+                      ('ORBIT', 'REFRACTION'), ('ATMOSPHERE', 'REFRACTION')):
             for dbg in ((), ('NANCHECK',)):
-                src = build_ray_shader(feats, {'CYAN': (1, 0, 0)}, pass_, dbg)
-                assert not lint_glsl(src), lint_glsl(src)
-                scene.Shader(src)
-                n += 1
+                yield build_ray_shader(feats, {'CYAN': (1, 0, 0)}, pass_, dbg)
+
+
+def test_variants_lint():
+    """Static text checks only; compiling is test_variants_compile."""
+    n = 0
+    for src in _ray_variants():
+        assert not lint_glsl(src), lint_glsl(src)
+        n += 1
     assert build_globe_shader() == build_globe_shader(FEATURES)
     return '%d ray variants' % n
 
 
+@gpu
+def test_variants_compile():
+    """Desktop GLSL 120 compile (not Pythonista's compiler: that needs the device)."""
+    n = 0
+    for src in _ray_variants():
+        assert scene.Shader(src).compiled
+        n += 1
+    return '%d ray variants' % n
+
+
+def test_shader_heights_use_one_unit():
+    """Every radius-to-km conversion goes through altitudeKm(): the drawn planet is
+    6378.137 / atmo_scale km per unit, so a literal Earth radius would read a known
+    altitude 1.5x too high at the default atmo_scale (weaker refraction)."""
+    import re
+    from orbitgfx import shaders
+    src = build_ray_shader(RAY_FEATURES, None, 'single')
+    code = re.sub(r'//[^\n]*', '', src)
+    assert not re.search(r'\b6371(\.0)?\b', code)
+    assert 'float altitudeKm(float r)' in src and '#define KM_PER_UNIT u_atm.y' in src
+    for name in ('RAY_COMMON_GLSL', 'ATMOS_GLSL', 'RAY_MAIN'):
+        body = re.sub(r'//[^\n]*', '', getattr(shaders, name))
+        # heights from the drawn radius: only via altitudeKm (true-scale orbit uses RE_KM)
+        assert not re.search(r'-\s*1\.0\)\s*\*\s*(u_atm\.y|6378|6371)', body), name
+    for line in src.splitlines():
+        if 'refrDeg(' in line and '=' in line and 'float refrDeg' not in line:
+            assert re.search(r'refrDeg\([^,]+,\s*(h|hk)\)', line), line
+
+
+@gpu
+def test_refraction_height_follows_atmo_scale():
+    """A known physical altitude stays the same km whatever atmo_scale draws: the
+    shader's altitudeKm() is run on the GPU for points h km up on each drawn planet."""
+    import re
+    from orbitgfx.luts import planet
+    src = build_ray_shader(RAY_FEATURES, None, 'single')
+    units = re.search(r'// Units:.*?float altitudeKm\(float r\) \{[^}]*\}', src, re.S).group(0)
+    probe = ('precision highp float;\n#define SCATTER\nuniform vec4 u_atm;\nuniform float u_r;\n'
+             + units + '\nvoid main() { gl_FragColor = vec4(altitudeKm(u_r) / 50.0, 0.0, 0.0, 1.0); }\n')
+    node = scene.SpriteNode(None, size=(4, 4))
+    node.shader = scene.Shader(probe)
+    rep = {}
+    for scale in (1.0, 1.5, 3.0):
+        rg, rt = planet(scale, RE)
+        node.shader.set_uniform('u_atm', (rt / rg, rg, 1.0, 0.0))
+        for h in (2.0, 20.0, 40.0):
+            node.shader.set_uniform('u_r', 1.0 + h / rg)
+            got = scene._render_sprite(node, 0.0)[1, 1, 0] / 255.0 * 50.0
+            assert abs(got - h) < 0.5, (scale, h, got)
+            rep[(scale, h)] = round(float(got), 1)
+    return rep
+
+
+@gpu
 def test_presets_build():
     sizes = {}
     for q in QUALITY:
@@ -158,6 +219,7 @@ def test_presets_build():
     return sizes
 
 
+@gpu
 def test_ring_and_disc_match_legacy():
     """Gate: ray core ring and disc within 1 px of LEGACY (3x pixels).
 
@@ -183,6 +245,7 @@ def test_ring_and_disc_match_legacy():
     return rep
 
 
+@gpu
 def test_perspective_disc_size():
     """A pinhole camera at the auto distance shows the same apparent Earth radius."""
     rep = {}
@@ -196,6 +259,7 @@ def test_perspective_disc_size():
     return rep
 
 
+@gpu
 def test_no_nan_any_preset_pass_pose():
     bad = {}
     no_phys = tuple(f for f in RAY_FEATURES if f not in ('SCATTER', 'WEATHER', 'VCLOUDS', 'SURFACE', 'RELIEF',
@@ -214,6 +278,7 @@ def test_no_nan_any_preset_pass_pose():
     return 'clean'
 
 
+@gpu
 def test_two_pass_matches_single_pass():
     """Radiance + overlay at render_scale 1.0 composite to (nearly) the single pass."""
     single = view('LOW')[0]['overlay']
@@ -276,6 +341,7 @@ def truth_points(gv, cam, sat, vel, n=40000):
     return np.stack([px, py], 1)
 
 
+@gpu
 def test_ring_matches_exact_projection():
     """Every ring pixel lies on the visible circle and every visible circle point is drawn."""
     rep = {}
@@ -330,6 +396,7 @@ def test_transmittance_lut_accuracy():
     return 'max abs error %.4f' % err
 
 
+@gpu
 def test_scatter_physics_sanity():
     """Day limb blue, backlit limb present, night disc dark, terminator not NaN."""
     rep = {}
@@ -392,6 +459,7 @@ def test_weather_map():
     return dict(mean=round(mean, 3), sahara=round(sahara, 3), storm_tracks=round(storm, 3))
 
 
+@gpu
 def test_clouds_two_pass_matches_single():
     """Volumetric clouds: half-res machinery at scale ~1 composites to the single pass."""
     single = view('MED', render_scale=1.0)[0]['overlay']
@@ -405,6 +473,7 @@ def test_clouds_two_pass_matches_single():
     return 'pixels off by >12/255: %.3f%%' % (100 * frac)
 
 
+@gpu
 def test_clouds_visible_every_preset():
     """With clouds on, the sunlit disc gets brighter (white cloud over dark ocean); off, no change."""
     rep = {}
@@ -469,6 +538,7 @@ def test_weather_film_playback():
     return '%d frames, %.0f h each' % (f.n, f.hours)
 
 
+@gpu
 def test_clouds_stable_over_time():
     """No screen-space or temporal jitter: a still view renders the same clouds frame to frame
     (only night-side lightning may flicker)."""
@@ -483,6 +553,7 @@ def test_clouds_stable_over_time():
     return rep
 
 
+@gpu
 def test_city_lights_hidden_under_cloud():
     """Night side (Australia after sunset): the overlay's city lights are dimmed by the
     cloud the line of sight crosses."""
@@ -553,6 +624,7 @@ def test_penumbra_sunlight():
     return {'penumbra_s': round(dur, 1), 'red/blue mid': round(float(np.median(red[mid])), 1)}
 
 
+@gpu
 def test_eclipse_marker_colour():
     """Rendered spacecraft glow through the entry: warm, then red, then dark."""
     P, sun, n = _eclipse_setup()
@@ -580,6 +652,7 @@ def test_eclipse_marker_colour():
     return [tuple(round(float(c), 3) for c in o) for o in out]
 
 
+@gpu(what='render')
 def test_astronaut_view():
     """Astronaut camera riding behind the spacecraft: finite image, sky above, the
     horizon an arc that is highest in the middle (seen from 500 km)."""
@@ -670,7 +743,7 @@ def _sunvis_refr(p, sun):
 
 
 def test_refraction():
-    """REFRACTION: the setting sun from the ground is lifted ~0.57 deg at the horizon
+    """REFRACTION: the setting sun from the ground is lifted ~0.48 deg at true elevation 0
     (Saemundsson), and from orbit the limb acts as a lens: after geometric shadow entry
     a dim red sunlight lingers for several seconds, continuously, and the light fades
     monotonically."""
@@ -697,6 +770,4 @@ def test_refraction():
 
 if __name__ == '__main__':
     warnings.simplefilter('ignore')
-    for name, fn in sorted(globals().items()):
-        if name.startswith('test_'):
-            print('PASS', name, fn() or '')
+    run_all(globals())

@@ -88,8 +88,10 @@ def planet(atmo_scale=3.0, re_km=6378.137):
 
     The on-screen atmosphere is `atmo_scale` times thicker than the real one
     relative to the Earth. That is modelled as a real 100 km atmosphere on a
-    planet `atmo_scale` times smaller, so all optics stay in real km and the
-    shader's unit radius is rg km.
+    planet `atmo_scale` times smaller: heights and extinction stay in real km
+    and the shader's unit radius is rg km. The curvature does not: grazing
+    paths are shorter through the air than on the real Earth, so limb and
+    horizon transmittance rise with atmo_scale. atmo_scale=1 is physical.
     """
     rg = re_km / float(atmo_scale)
     return rg, rg + ATMO['top_km']

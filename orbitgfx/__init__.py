@@ -21,7 +21,7 @@ the same code imports and runs (shaders need moderngl, rendering needs skia).
 import os as _os
 import sys as _sys
 
-__version__ = '2.0.0a16'     # TUNING.md
+__version__ = '2.0.0a17'     # TUNING.md
 PACKAGE_DIR = _os.path.dirname(_os.path.abspath(__file__))
 SHIM_DIR = _os.path.join(PACKAGE_DIR, 'sandbox', 'shim')
 EXAMPLES_DIR = _os.path.join(PACKAGE_DIR, 'examples')

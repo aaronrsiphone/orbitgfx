@@ -2,6 +2,12 @@
 
 Conventions: ECI is mean-equator inertial, ECEF = Rz(-theta) ECI where theta
 is the Earth rotation angle (GMST). Distances in km unless noted.
+
+Fidelity: a low-precision demonstration model, for visualisation. GMST is the
+mean sidereal angle (no UT1, precession or nutation), the Sun is the Almanac
+low-precision series, the eclipse is a cylinder, and ground tracks, footprints
+and the map use a sphere. Only ground stations use the WGS84 ellipsoid
+(geodetic_to_ecef), because elevation masks are sensitive to it.
 """
 import math
 import time
@@ -14,6 +20,8 @@ J2 = 1.08262668e-3
 SIDEREAL_DAY = 86164.0905   # s
 OMEGA_E = 2.0 * math.pi / SIDEREAL_DAY
 C_KM_S = 299792.458
+WGS84_F = 1.0 / 298.257223563
+WGS84_E2 = WGS84_F * (2.0 - WGS84_F)
 
 
 def julian_date(unix=None):
@@ -61,9 +69,31 @@ def latlon(p):
 
 
 def llxyz(lon, lat, r=RE):
+    """Point on a sphere of radius r (spherical lat/lon; see geodetic_to_ecef)."""
     lo, la = math.radians(lon), math.radians(lat)
     return (r * math.cos(la) * math.cos(lo), r * math.cos(la) * math.sin(lo),
             r * math.sin(la))
+
+
+def geodetic_to_ecef(lat, lon, alt_km=0.0):
+    """WGS84 geodetic latitude/longitude (deg) and ellipsoidal height (km) to ECEF km."""
+    la, lo = math.radians(lat), math.radians(lon)
+    n = RE / math.sqrt(1.0 - WGS84_E2 * math.sin(la) ** 2)   # prime vertical radius
+    return np.array(((n + alt_km) * math.cos(la) * math.cos(lo),
+                     (n + alt_km) * math.cos(la) * math.sin(lo),
+                     (n * (1.0 - WGS84_E2) + alt_km) * math.sin(la)))
+
+
+def geodetic_up(lat, lon):
+    """Ellipsoid normal (local vertical) at a geodetic latitude/longitude (deg), ECEF."""
+    la, lo = math.radians(lat), math.radians(lon)
+    return np.array((math.cos(la) * math.cos(lo), math.cos(la) * math.sin(lo), math.sin(la)))
+
+
+def elevation(rho, up):
+    """Elevation (deg) of line-of-sight vector(s) rho (...,3) above the plane normal to up."""
+    rho = np.asarray(rho, float)
+    return np.degrees(np.arcsin(np.clip(rho @ up / np.linalg.norm(rho, axis=-1), -1.0, 1.0)))
 
 
 def shadow_margin(p, s):
@@ -84,7 +114,8 @@ def small_circle(lat, lon, ang, n=72):
 
 
 def horizon_angle(r_km, mask_deg=0.0):
-    """Earth central angle (rad) visible from radius r above an elevation mask."""
+    """Earth central angle (rad) visible from radius r above an elevation mask
+    (spherical Earth: for drawing footprints, not for contact timing)."""
     em = math.radians(mask_deg)
     return math.acos(RE / r_km * math.cos(em)) - em
 
