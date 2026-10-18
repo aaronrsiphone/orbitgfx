@@ -27,7 +27,7 @@ J2-only orbit.
 | Ground track, footprints, map | Spherical lat/lon | Drawing approximation | spherical visualisation |
 | Orbital eclipse | Cylinder for the timeline; shader solar disc, penumbra and limb lens | Disclosed approximation | idealised illumination |
 | Atmosphere transmittance | Exponential Rayleigh / aerosol, tent ozone, Beer–Lambert | LUT vs its direct integral (`test_transmittance_lut_accuracy`); absolute radiance not benchmarked | physically informed reduced model |
-| Scattering, refraction | Single scattering + tuned ambient, haze, limb gain; Saemundsson refraction, exponential limb bend | Heights in one unit, `altitudeKm()` (`test_shader_heights_use_one_unit`, `test_refraction_height_follows_atmo_scale`); refraction formulas not checked against a reference optical model | physically informed with artistic controls |
+| Scattering, refraction | Single scattering + tuned ambient, haze, limb gain; Saemundsson refraction above a point's horizon, exponential limb bend below it, one refracted sun direction per point (`sunAt`) | Heights in one unit (`test_shader_heights_use_one_unit`, `test_refraction_height_follows_atmo_scale`); GPU `refrDegAt` = CPU `astro.refraction_deg`, continuous and monotonic (`test_refraction_model_matches_cpu_twin`); `sunAt` lift, azimuth, off-switch (`test_sun_direction_refracted`); ground lit by the refracted sun (`test_refraction_lights_the_ground`). Formulas not checked against a reference ray tracer | physically informed with artistic controls |
 | QG circulation (`weather.py` tier A, B) | Two-layer Phillips QG, Fourier/FD inversion, semi-Lagrangian advection, relaxation, friction, polar filter | PV ↔ streamfunction round trip 6e-14, constant tracer kept (`test_qg_inversion_round_trip`); short-run stability (`test_weather_model_short_run`) | idealised midlatitude dynamics |
 | Moisture and clouds (tiers C, D) | Relative saturation proxy, normalised ascent, clipping, percentile coverage calibration | Visual only | dynamically driven procedural clouds |
 | Tropical cyclones (tier E) | Seeded genesis, steering, spiral-band stamp into `cc` | Art: never feeds back into the dynamics | empirical storm artwork |
@@ -61,7 +61,7 @@ J2-only orbit.
 | `MS_GAIN` | 0.10 | tuned | empirical closure | multiple-scattering ambient |
 | `CLOUD_SCALE` | 4.0 | phone-scale readability | artistic | cloud shell drawn 4x thicker |
 | Sun disc | 2x true radius | readability | artistic | sun size from the ground |
-| Refraction | Saemundsson (true elevation in), 0.48° at 0°; limb bend 0.0203 rad · exp(−h/7.3 km) | literature formulas | empirical closure | sunset timing, eclipse reddening |
+| Refraction | Saemundsson (true elevation in), 0.48° at 0°; limb bend 0.0203 rad · exp(−h/7.3 km) below a point's horizon | literature formulas | empirical closure | sunset timing, ground and cloud light at twilight, eclipse reddening |
 | `CLEAR_PCT`, `OVERCAST_PCT` | 40, 88 | Earth ~67 % cloudy | calibration | global cloud cover |
 | QG `ld_km`, `shear`, `t_rad`, `t_fric`, `t_drag1` | 1000 km, 1.6 rad/day, 20 d, 4 d, 5 d | tuned for a realistic-looking jet | closure | storm size, jet strength |
 

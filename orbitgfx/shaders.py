@@ -520,22 +520,49 @@ float altitudeKm(float r) { return (r - 1.0) * KM_PER_UNIT; }
 // Astronomical refraction (Saemundsson 1986, standard air): how much the air lifts an
 // object at TRUE elevation e (degrees), in degrees; 0.48 deg for e = 0 (the familiar
 // 0.57 deg is Bennett's value for an object seen ON the horizon), 0.1 deg at 9 deg.
-// Scaled by the air density at the observer's height h (km).
-float refrDeg(float e, float h) {
-    float a = radians(max(e, -2.0) + 10.3 / (max(e, -2.0) + 5.11));
-    return 1.02 / 60.0 / tan(a) * exp(-max(h, 0.0) / 8.0) * smoothstep(-2.0, -1.0, e);
-}
-// sine of the elevation the sun appears at, seen from radius r with the true value s
-float refrSin(float r, float s) {
-    float h = altitudeKm(r);
-    if (h > 40.0) return s;
-    float e = degrees(asin(clamp(s, -1.0, 1.0)));
-    return sin(radians(e + refrDeg(e, h)));
-}
+// Scaled by the air density at the observer's height (8 km scale height).
 // total bending of a ray that grazes the Earth at tangent height h km and leaves again
 // (twice the horizon refraction at that height), radians
 float limbBend(float h) { return 0.0203 * exp(-h / 7.3); }
+// Refraction (degrees) of the sun at TRUE elevation e (degrees) seen from radius r.
+// Above the local horizon: Saemundsson. Below it (a point up in the air, e.g. a cloud
+// top after the ground's sunset) the light has come down to tangent height ht and
+// crossed denser air than the point's own: limbBend(ht) - limbBend(h) more than the
+// horizon value, continuous at e = 0 (Saemundsson alone fades out below -2 deg).
+float refrDegAt(float r, float e) {
+    float h = max(altitudeKm(r), 0.0);
+    float rho = exp(-h / 8.0);
+    float a = radians(max(e, -2.0) + 10.3 / (max(e, -2.0) + 5.11));
+    float R = 1.02 / 60.0 / tan(a) * rho * smoothstep(-2.0, -1.0, e);
+    if (e < 0.0) {
+        float ht = max(altitudeKm(r * cos(radians(e))), 0.0);
+        R = max(R, 0.48302 * rho + degrees(limbBend(ht) - limbBend(h)));
+    }
+    return R;
+}
+// sine of the elevation the sun appears at, seen from radius r with the true value s
+float refrSin(float r, float s) {
+    if (s >= 0.0 && altitudeKm(r) > 40.0) return s;
+    float e = degrees(asin(clamp(s, -1.0, 1.0)));
+    return sin(radians(min(e + refrDegAt(r, e), 90.0)));
+}
 #endif
+// The sun's direction as seen from a point with local vertical up (unit) at radius r:
+// lifted toward the zenith by refraction (same azimuth). Every lighting term at the
+// point (Lambert, glint, shadows, transmittance via sunTa) uses it, so REFRACTION
+// moves the terminator and the light instead of only brightening the transmittance.
+vec3 sunAt(vec3 up, float r) {
+#ifdef REFRACTION
+    float s = dot(u_sun, up);
+    vec3 hz = u_sun - up * s;
+    float lh = length(hz);
+    if (lh < 1e-6) return u_sun;
+    float sa = refrSin(r, s);
+    return hz * (sqrt(max(1.0 - sa * sa, 0.0)) / lh) + up * sa;
+#else
+    return u_sun;
+#endif
+}
 #ifdef PENUMBRA
 // Sunlight reaching a point outside the Earth (Earth radii): the visible part of the
 // solar disc past the limb (0.267 deg radius, exact for a straight limb edge) times the
@@ -709,13 +736,18 @@ vec3 transmittance(float r, float mu) {
                                      0.5 / 64.0 + xr * (63.0 / 64.0))).rgb;
     return c * c;
 }
-// sunlight reaching radius r with the sun at cos-zenith mus (0 below the horizon)
+// sunlight reaching radius r from the sun at APPARENT cos-zenith mua (already refracted,
+// e.g. from sunAt or a line of sight toward the disc), 0 below the horizon
+vec3 sunTa(float r, float mua) {
+    float muh = -sqrt(max(1.0 - 1.0 / (r * r), 0.0));
+    return transmittance(r, mua) * smoothstep(muh - 0.006, muh + 0.006, mua);
+}
+// sunlight reaching radius r with the sun at TRUE cos-zenith mus
 vec3 sunT(float r, float mus) {
 #ifdef REFRACTION
     mus = refrSin(r, mus);                    // the air lifts the low sun: light lasts longer
 #endif
-    float muh = -sqrt(max(1.0 - 1.0 / (r * r), 0.0));
-    return transmittance(r, mus) * smoothstep(muh - 0.006, muh + 0.006, mus);
+    return sunTa(r, mus);
 }
 vec3 density(float h) {                       // Rayleigh, Mie, ozone at altitude h km
     return vec3(exp(-h / 8.0), exp(-h / 1.2), max(0.0, 1.0 - abs(h - 25.0) / 15.0));
@@ -1145,7 +1177,7 @@ float cloudCoverEst(vec3 nw, float slant) {
 #endif
 
 // shadow factor on the ground (direct sunlight) from the clouds above
-float cloudShadow(vec3 nw, float mu, float dk) {
+float cloudShadow(vec3 nw, vec3 sd, float mu, float dk) {
     if (mu <= 0.0) return 1.0;
     float thick = u_cld.y - u_cld.x;
     float ms = max(mu, 0.12);
@@ -1155,14 +1187,14 @@ float cloudShadow(vec3 nw, float mu, float dk) {
     float tau = 0.0;
     for (int k = 0; k < 2; k++) {
         float hn = 0.25 + 0.5 * float(k);
-        vec3 q = wframe(nw + u_sun * ((u_cld.x + thick * hn) / ms));
+        vec3 q = wframe(nw + sd * ((u_cld.x + thick * hn) / ms));
         q *= (1.0 + u_cld.x + thick * hn) / length(q);
         vec3 w = weatherAt(warpW(q));
         tau += cloudDens(q, hn, w, dk);
     }
     tau *= u_cld.z * thick * 0.5 / ms;
 #else
-    vec3 q = wframe(nw + u_sun * ((u_cld.x + 0.25 * thick) / ms));
+    vec3 q = wframe(nw + sd * ((u_cld.x + 0.25 * thick) / ms));
     vec3 w = weatherAt(q);
     float tau = 4.0 * w.r * w.r;
 #endif
@@ -1390,9 +1422,9 @@ void main() {
 #ifdef REFRACTION
         // seen through the air: lifted, and squashed (the lower limb is lifted more)
         float et = degrees(asin(clamp(dot(u_sun, upo), -1.0, 1.0)));
-        float hk = altitudeKm(length(ro));
-        float ea = et + refrDeg(et, hk);
-        float sq = 1.0 + (refrDeg(et + 0.25, hk) - refrDeg(et - 0.25, hk)) / 0.5;   // d(apparent)/d(true)
+        float ro1 = length(ro);
+        float ea = et + refrDegAt(ro1, et);
+        float sq = 1.0 + (refrDegAt(ro1, et + 0.25) - refrDegAt(ro1, et - 0.25)) / 0.5;   // d(apparent)/d(true)
         vec3 hz = normalize(u_sun - upo * dot(u_sun, upo));
         vec3 sa = hz * cos(radians(ea)) + upo * sin(radians(ea));
         float del = asin(clamp(dot(rd, upo), -1.0, 1.0)) - radians(ea);          // up/down from its centre
@@ -1403,7 +1435,8 @@ void main() {
         cs = dot(rd, sa);
 #endif
         float glow = exp((cs - 1.0) * 1500.0) * 0.03;
-        Lsky += sunT(length(ro), dot(upo, rd)) * (sd * 40.0 + glow) * u_atm.z * Tcl;
+        // the line of sight to the disc is already the refracted ray: no second lift
+        Lsky += sunTa(length(ro), dot(upo, rd)) * (sd * 40.0 + glow) * u_atm.z * Tcl;
     }
     vec3 skyc = tonemapL(Lsky);
     overP(skyc, max(1.0 - Tcl, max(skyc.r, max(skyc.g, skyc.b))));
@@ -1469,7 +1502,8 @@ void main() {
         float land = tx.r;
         float coast = tx.g;
         float lights = tx.b;
-        float mu = dot(nw, u_sun);
+        vec3 sunG = sunAt(nw, 1.0);           // the sun as the ground sees it (refracted)
+        float mu = dot(nw, sunG);
 #if defined(SURFACE) && defined(DO_RAD)
         // NASA Blue Marble colour (sea ice added); u_texture is the matching data texture
         // (land, coast and Black Marble lights); aux: R height sqrt(h / 9 km), 0 = water,
@@ -1492,12 +1526,12 @@ void main() {
         vec3 nn = cross(ne, ee);
         vec3 nre = normalize(ne - ee * slope.x - nn * slope.y);
         vec3 nr = vec3(u_rot.x * nre.x - u_rot.y * nre.y, u_rot.y * nre.x + u_rot.x * nre.y, nre.z);
-        mur = dot(nr, u_sun);
+        mur = dot(nr, sunG);
 #ifdef RELIEF_SHADOW
         float rvis = 1.0;
         if (land > 0.5 && mu > 0.0 && mu < 0.6) {
             // march toward the sun across the height field: mountain shadows at low sun
-            vec3 sE = vec3(u_rot.x * u_sun.x + u_rot.y * u_sun.y, -u_rot.y * u_sun.x + u_rot.x * u_sun.y, u_sun.z);
+            vec3 sE = vec3(u_rot.x * sunG.x + u_rot.y * sunG.y, -u_rot.y * sunG.x + u_rot.x * sunG.y, sunG.z);
             vec2 sd = vec2(dot(sE, ee), dot(sE, nn));
             float shz = length(sd);
             if (shz > 1e-3) {
@@ -1557,9 +1591,9 @@ void main() {
         vec3 bml = toLin(bm) * SURF_GAIN;
         alb = mix(mix(vec3(0.008, 0.022, 0.045), bml, seaice), bml, land);
 #endif
-        vec3 Tg = sunT(1.0, mu);
+        vec3 Tg = sunTa(1.0, mu);
 #if defined(WEATHER) && !defined(NO_CLOUD_SHADOW)
-        Tg *= cloudShadow(nw, mu, 1.0 - smoothstep(0.002, 0.006, pixw(tE)));
+        Tg *= cloudShadow(nw, sunG, mu, 1.0 - smoothstep(0.002, 0.006, pixw(tE)));
 #endif
         vec3 sky = vec3(0.30, 0.50, 1.0) * 0.05 * smoothstep(-0.20, 0.30, mu);   // sky ambient
 #ifdef SURFACE
@@ -1575,7 +1609,7 @@ void main() {
         vec3 col = alb * E;
         col = mix(col, vec3(1.6) * E, cl * 0.92);                                // 2D clouds (LOW), lit
 #ifdef GLINT
-        vec3 hv = normalize(u_sun + view);
+        vec3 hv = normalize(sunG + view);
         float nh = max(dot(nw, hv), 0.0);
         float wet = (1.0 - land) * (1.0 - cl);
 #ifdef SURFACE
@@ -1650,7 +1684,7 @@ void main() {
         float mux = mu / 0.05;
         col += vec3(0.65, 0.32, 0.10) * 0.11 * exp(-mux * mux) * (1.0 - cl);
 #ifdef GLINT
-        vec3 hv = normalize(u_sun + view);
+        vec3 hv = normalize(sunG + view);
         float nh = max(dot(nw, hv), 0.0);
         float wet = day * (1.0 - land) * (1.0 - cl);
         col += vec3(0.80, 0.90, 1.0) * (0.95 * pow(nh, 220.0) + 0.10 * pow(nh, 16.0)) * wet;

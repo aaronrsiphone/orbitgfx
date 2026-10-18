@@ -96,6 +96,32 @@ def elevation(rho, up):
     return np.degrees(np.arcsin(np.clip(rho @ up / np.linalg.norm(rho, axis=-1), -1.0, 1.0)))
 
 
+def refraction_deg(e_deg, h_km=0.0, km_per_unit=RE):
+    """Atmospheric refraction (deg) of the sun at TRUE elevation e_deg seen from height
+    h_km: the CPU twin of the shader's refrDegAt() (REFRACTION).
+
+    Above the horizon Saemundsson (1986) scaled by the air density at h (8 km scale
+    height): 0.48 deg at e = 0 (0.57 deg is the value for an object SEEN on the
+    horizon). Below it, light reaching an elevated point has grazed down to tangent
+    height ht and is bent limb_bend(ht) - limb_bend(h) more. km_per_unit: the drawn
+    planet's radius (RE / atmo_scale in a GlobeView), which sets that geometry.
+    """
+    h = max(float(h_km), 0.0)
+    rho = math.exp(-h / 8.0)
+    ec = max(float(e_deg), -2.0)
+    x = min(1.0, max(0.0, float(e_deg) + 2.0))
+    R = 1.02 / 60.0 / math.tan(math.radians(ec + 10.3 / (ec + 5.11))) * rho * x * x * (3 - 2 * x)
+    if e_deg < 0.0:
+        ht = max(((km_per_unit + h) * math.cos(math.radians(e_deg))) - km_per_unit, 0.0)
+        R = max(R, 0.48302 * rho + math.degrees(limb_bend(ht) - limb_bend(h)))
+    return R
+
+
+def limb_bend(h_km):
+    """Total bending (rad) of a ray grazing the Earth at tangent height h_km."""
+    return 0.0203 * math.exp(-h_km / 7.3)
+
+
 def shadow_margin(p, s):
     """Cylindrical Earth shadow: negative inside the umbra cylinder (km)."""
     d = np.asarray(np.sum(p * s, axis=-1))

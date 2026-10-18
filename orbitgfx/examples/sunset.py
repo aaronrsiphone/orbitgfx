@@ -11,7 +11,11 @@ same shell and noise as from orbit, the sun's disc is twice its size.
     drag            look around       double tap   ULTRA / HIGH / MED
 
 With refraction on (the default) the air lifts the setting sun by about half a
-degree and squashes it into an oval, and sunlight lasts a couple of minutes longer.
+degree and squashes it into an oval, and sunlight lasts a couple of minutes longer:
+the ground, sea glint and cloud shadows are lit by the lifted sun, and clouds high up
+keep their light after the ground's sunset (their light grazed the dense low air).
+The caption shows the true elevation and, with refraction, where the sun is seen.
+Toggling rebuilds the globe: REFRACTION is a compile-time shader feature.
 """
 import math
 import os
@@ -26,7 +30,7 @@ except ImportError:
     import orbitgfx  # noqa: F401
 import scene
 from orbitgfx import GlobeView, Camera, Gestures, cached_earth_image, pil_texture, safety
-from orbitgfx.astro import RE
+from orbitgfx.astro import RE, refraction_deg
 
 TOP_INSET = 64
 EYE_KM = 0.4                       # standing on a hill
@@ -162,8 +166,9 @@ class Sunset(scene.Scene):
         self.globe.update(self.cam, sun, 0.0, cloud_hours=self.hours0 + self.sim_s / 3600.0)
         name = SITES[self.si][0]
         self.title.text = name
-        self.sub.text = 'sun %+5.1f deg   %s   %s   refraction %s' % (
-            elev, ('paused', '60x', '240x')[self.rate_i], QUALITIES[self.qi],
+        seen = ' (seen %+.1f)' % (elev + refraction_deg(elev, EYE_KM)) if self.refraction else ''
+        self.sub.text = 'sun %+.1f deg%s  %s  %s  refraction %s' % (
+            elev, seen, ('paused', '60x', '240x')[self.rate_i], QUALITIES[self.qi],
             'on' if self.refraction else 'off')
 
 

@@ -177,9 +177,7 @@ def test_shader_heights_use_one_unit():
         body = re.sub(r'//[^\n]*', '', getattr(shaders, name))
         # heights from the drawn radius: only via altitudeKm (true-scale orbit uses RE_KM)
         assert not re.search(r'-\s*1\.0\)\s*\*\s*(u_atm\.y|6378|6371)', body), name
-    for line in src.splitlines():
-        if 'refrDeg(' in line and '=' in line and 'float refrDeg' not in line:
-            assert re.search(r'refrDeg\([^,]+,\s*(h|hk)\)', line), line
+    assert 'refrDeg(' not in code                  # one refraction entry: refrDegAt(r, e)
 
 
 @gpu
@@ -204,6 +202,112 @@ def test_refraction_height_follows_atmo_scale():
             assert abs(got - h) < 0.5, (scale, h, got)
             rep[(scale, h)] = round(float(got), 1)
     return rep
+
+
+def _refraction_lib():
+    """The shader's units + refraction + sunAt GLSL, for running on its own."""
+    import re
+    src = build_ray_shader(('SCATTER', 'REFRACTION'), None, 'single')
+    body = re.search(r'// Units:.*?\nvec3 sunAt\(.*?\n\}\n', src, re.S).group(0)
+    return 'uniform vec4 u_atm;\nuniform vec3 u_sun;\n' + body
+
+
+@gpu
+def test_refraction_model_matches_cpu_twin():
+    """refrDegAt() on the GPU equals astro.refraction_deg (Saemundsson on and above the
+    horizon, the grazing-path term below it), at the ground and up in the air, on the
+    true-scale and the atmo_scale 1.5 planets; continuous, and the apparent elevation
+    rises with the true one (no folds)."""
+    from orbitgfx.astro import refraction_deg
+    from orbitgfx.tests._gpu import gpu_eval
+    from orbitgfx.luts import planet
+    lib = _refraction_lib()
+    rep = {}
+    for scale in (1.0, 1.5):
+        km = planet(scale, RE)[0]
+        for h in (0.0, 0.4, 2.0, 10.0, 30.0):
+            es, got = gpu_eval(lib, 'refrDegAt(1.0 + %r / u_atm.y, x)' % h, -5.0, 10.0, 301,
+                               uniforms={'u_atm': (1.0 + 100.0 / km, km, 1.0, 0.0)},
+                               defines=('SCATTER', 'REFRACTION'))
+            ref = np.array([refraction_deg(e, h, km) for e in es])
+            assert np.abs(got - ref).max() < 2e-4, (scale, h, np.abs(got - ref).max())
+            assert np.diff(es + got).min() > 0.0, (scale, h)          # apparent rises
+            assert np.abs(np.diff(got)).max() < 0.05, (scale, h)      # no jumps
+            rep[(scale, h)] = round(float(ref[np.argmin(np.abs(es))]), 3)
+    assert abs(refraction_deg(0.0) - 0.483) < 1e-3
+    assert abs(refraction_deg(10.0) - 0.090) < 1e-3
+    # the sun's centre is seen on the horizon at true -0.58 deg (Bennett: 0.575 deg of
+    # refraction for an object seen at 0 deg; tables round this to 34')
+    e = -0.3
+    while e + refraction_deg(e) > 0.0:
+        e -= 0.001
+    assert -0.60 < e < -0.56, e
+    # a cloud top at 10 km after the ground's sunset still sees a lifted sun: the light
+    # grazed the dense low air (Saemundsson alone would give 0 below -2 deg)
+    assert refraction_deg(-3.0, 10.0) > 0.8
+    return rep
+
+
+@gpu
+def test_sun_direction_refracted():
+    """sunAt() lifts the sun toward the local zenith by refrDegAt(), keeps its azimuth
+    and length, and is exactly u_sun without REFRACTION."""
+    from orbitgfx.astro import refraction_deg
+    from orbitgfx.tests._gpu import gpu_eval
+    lib = _refraction_lib()
+    up = np.array((0.6, 0.0, 0.8))
+    east = np.array((0.0, 1.0, 0.0))
+    north = np.cross(up, east)
+    atm = (1.0 + 100.0 / RE, RE, 1.0, 0.0)
+    for e in (5.0, 0.5, 0.0, -0.4, -1.5):
+        er = math.radians(e)
+        sun = math.cos(er) * (0.8 * north + 0.6 * east) + math.sin(er) * up
+        u = {'u_atm': atm, 'u_sun': tuple(sun)}
+        expr = 'sunAt(vec3(0.6, 0.0, 0.8), 1.0)'
+        vals = [gpu_eval(lib, '%s.%s' % (expr, c), 0, 1, 1, u, ('SCATTER', 'REFRACTION'))[1][0]
+                for c in 'xyz']
+        off = [gpu_eval(lib, '%s.%s' % (expr, c), 0, 1, 1, u, ('SCATTER',))[1][0] for c in 'xyz']
+        assert np.allclose(off, sun, atol=1e-6), (e, off)
+        v = np.array(vals)
+        assert abs(np.linalg.norm(v) - 1.0) < 1e-5
+        ea = math.degrees(math.asin(v @ up))
+        assert abs(ea - (e + refraction_deg(e))) < 2e-3, (e, ea)
+        h = v - up * (v @ up)
+        assert abs(math.atan2(h @ east, h @ north) - math.atan2(0.6, 0.8)) < 1e-5
+
+
+@gpu
+def test_refraction_lights_the_ground():
+    """REFRACTION moves the ground's sunlight with the sun it lifts: just after the
+    geometric sunset the sea is still sunlit (it was black before, because only the
+    transmittance was refracted and the Lambert term still used the true sun)."""
+    from orbitgfx.views import look_at
+    up = np.array((0.6, 0.0, 0.8))
+    east = np.array((0.0, 1.0, 0.0))
+    north = np.cross(up, east)
+    eye = up * (1.0 + 0.4 / RE)
+    look = up * (1.0 - 0.002) + north * 0.01                    # down at the sea toward the sun
+    from orbitgfx.astro import refraction_deg
+    seen = -0.25 + refraction_deg(-0.25)                        # +0.24 deg apparent
+    out = {}
+    for e in (0.6, -0.25, seen):
+        er = math.radians(e)
+        sun = math.cos(er) * north + math.sin(er) * up
+        for refr in (False, True):
+            feats = ('SCATTER', 'PENUMBRA') + (('REFRACTION',) if refr else ())
+            cam = Camera(fov_deg=20.0)
+            cam.eye, cam.look = eye, look
+            img = view('LOW', feats, cam=cam, sun=sun, perspective=True, atmo_scale=1.0,
+                       haze=1.0)[0]['overlay']
+            out[(e, refr)] = float(img[img.shape[0] // 2 - 20:img.shape[0] // 2 + 20, :, :3].mean())
+    # true elevation -0.25 deg: geometrically set, but the refracted sun is up, so the
+    # sea is lit as by an unrefracted sun at the apparent elevation (the sky's own
+    # light differs a little: its refraction is per point)
+    assert out[(-0.25, True)] > 1.3 * out[(-0.25, False)], out
+    assert abs(out[(-0.25, True)] / out[(seen, False)] - 1.0) < 0.1, out
+    # still above the horizon either way: the lifted sun is a little brighter
+    assert out[(0.6, True)] > out[(0.6, False)], out
+    return {'%+.2f %s' % (e, 'on' if r else 'off'): round(v, 4) for (e, r), v in out.items()}
 
 
 @gpu

@@ -39,6 +39,36 @@ def gpu(fn=None, what='GPU'):
     return run
 
 
+def gpu_eval(lib, expr, x0, x1, n=64, uniforms=None, defines=()):
+    """Evaluate a GLSL float expression of `x` (linear from x0 to x1 over n samples)
+    on the sandbox GPU at 32-bit float precision. lib: GLSL functions and uniform
+    declarations it needs. Returns (xs, values)."""
+    import moderngl
+    import numpy as np
+    ctx = scene._gl()
+    head = '#version 120\n' + ''.join('#define %s\n' % d for d in defines)
+    fs = (head + lib + '\nuniform float u_x0;\nuniform float u_x1;\n'
+          'void main() {\n'
+          '    float x = mix(u_x0, u_x1, (gl_FragCoord.x - 0.5) / %.1f);\n'
+          '    gl_FragColor = vec4(%s, 0.0, 0.0, 1.0);\n}\n' % (max(n - 1, 1), expr))
+    vs = ('#version 120\nattribute vec2 in_pos;\n'
+          'void main() { gl_Position = vec4(in_pos, 0.0, 1.0); }')
+    prog = ctx.program(vertex_shader=vs, fragment_shader=fs)
+    for k, v in dict(uniforms or {}, u_x0=float(x0), u_x1=float(x1)).items():
+        if k in prog:
+            prog[k].value = v
+    tex = ctx.texture((n, 1), 4, dtype='f4')
+    fbo = ctx.framebuffer(color_attachments=[tex])
+    fbo.use()
+    vbo = ctx.buffer(np.array([-1, -1, 1, -1, -1, 1, 1, 1], 'f4').tobytes())
+    vao = ctx.simple_vertex_array(prog, vbo, 'in_pos')
+    vao.render(moderngl.TRIANGLE_STRIP)
+    out = np.frombuffer(fbo.read(components=4, dtype='f4'), np.float32).reshape(n, 4)[:, 0]
+    for o in (vao, vbo, fbo, tex, prog):
+        o.release()
+    return np.linspace(x0, x1, n), out.astype(float)
+
+
 def run_all(namespace):
     """`python -m orbitgfx.tests.<module>`: PASS / SKIP per test."""
     for name, fn in sorted(namespace.items()):

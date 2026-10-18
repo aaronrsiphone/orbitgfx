@@ -504,12 +504,15 @@ colour, and toward orange where red light remains).
 
 | Where | Model | Knobs |
 | --- | --- | --- |
-| Sunlight near the ground (ground, clouds, sky) | the sun's elevation lifted by Saemundsson's formula (input: TRUE elevation), 0.48 deg for a sun on the true horizon, 0.1 deg at 10 deg (the familiar 0.57 deg is Bennett's value for an object seen on the horizon), scaled by air density at the point's physical height, `altitudeKm()` (8 km scale height) | `refrDeg()` |
-| The sun's disc from the ground | lifted by the same amount and squashed vertically (the lower edge lifted more) | disc drawn 2x true size: `0.0090` rad radius in the disc code |
+| Sunlight in the air (ground, sea, clouds, sky) | at every lit point the sun's direction is lifted toward that point's zenith (`sunAt()`), and that one direction drives the transmittance, the Lambert term, relief and mountain shadows, the glint, cloud shadows and the day/night switch of the city lights. Above the point's horizon the lift is Saemundsson's formula (input: TRUE elevation): 0.48 deg for a sun on the true horizon, 0.09 deg at 10 deg (the familiar 0.57 deg is Bennett's value for an object seen on the horizon), scaled by the air density at the point's physical height, `altitudeKm()` (8 km scale height). Below it (clouds and air above the ground's horizon after sunset) the light has grazed down to tangent height ht: lifted `limbBend(ht) - limbBend(h)` more, so high cloud keeps its light for longer | `refrDegAt()`, `sunAt()`; CPU twin `astro.refraction_deg()` |
+| The sun's disc from the ground | lifted by the same amount and squashed vertically (the lower edge lifted more); its colour is the transmittance along the line of sight, which is already the refracted ray (not lifted a second time) | disc drawn 2x true size: `0.0090` rad radius in the disc code |
 | Eclipses from orbit | the limb is a lens: a ray grazing at height h is bent by 0.0203 rad x exp(-h / 7.3 km) (1.16 deg at the surface); the arriving ray is found by bisection, and its light is spread by the vertical squeeze (refractive dimming). Dim red sunlight lingers ~15 s past geometric shadow | `limbBend()` |
 
-Not modelled: terrestrial refraction (the sea horizon is not lifted), the green flash,
-and the glint uses the unrefracted sun.
+Not modelled: terrestrial refraction (the sea horizon is not lifted), the green flash.
+Approximations: scattering phase angles and the clouds' own light-marching rays use the
+true sun direction (they differ by under 1.2 deg); the mission timeline's eclipse
+windows are the unrefracted cylinder (the globe's PENUMBRA lighting is refracted).
+`REFRACTION` is a compile-time feature: toggling it means rebuilding the GlobeView.
 
 ### Spacecraft (`CRAFTLIGHT`)
 

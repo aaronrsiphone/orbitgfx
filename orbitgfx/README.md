@@ -193,10 +193,13 @@ Camera(fov_deg=50, distance=1.2)                 # or set the projection on the 
   - `CRAFTLIGHT`: the spacecraft is drawn as a small lit sphere (sun side,
     terminator, earthshine from the Earth below), with the outline kept so it
     always reads as a marker.
-  - `REFRACTION` (every ray preset): the air bends light. Sunlight near the
-    ground arrives from a sun lifted by the standard astronomical refraction
-    (Saemundsson: 0.48 deg for a sun on the true horizon, 0.1 deg at 10 deg),
-    so the day and the afterglow last a couple of minutes longer. From the ground
+  - `REFRACTION` (every ray preset): the air bends light. Every lit point sees
+    the sun lifted toward its zenith (`sunAt()`) by the standard astronomical
+    refraction (Saemundsson: 0.48 deg for a sun on the true horizon, 0.09 deg at
+    10 deg), and that direction drives all of its lighting (transmittance,
+    Lambert, glint, shadows), so the day and the afterglow last a couple of
+    minutes longer. Clouds above the ground's horizon after sunset are lit by
+    light that grazed the dense low air and is bent more. From the ground
     the sun's disc is drawn lifted and squashed into an oval (the lower edge is
     lifted more). From orbit the limb is a lens: a ray grazing at height h is
     bent by about 1.2 deg x exp(-h / 7.3 km), so at eclipse entry dim red
