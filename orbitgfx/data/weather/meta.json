@@ -1,0 +1,22 @@
+{
+ "frames": 96,
+ "frame_hours": 1.0,
+ "loop_days": 4.0,
+ "decl_deg": -9.0,
+ "channels": [
+  "coverage",
+  "type",
+  "cirrus"
+ ],
+ "grid": [
+  256,
+  128
+ ],
+ "size": [
+  512,
+  256
+ ],
+ "spin_days": 30.0,
+ "model": "two-layer QG + moisture (orbitgfx.weather)",
+ "version": 2
+}

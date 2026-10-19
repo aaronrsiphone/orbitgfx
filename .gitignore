@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.orbitgfx_cache/
+orbitgfx/tests/out/
+orbitgfx_device_report/
+orbitgfx_device_report.zip
