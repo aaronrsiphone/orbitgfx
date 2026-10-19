@@ -1623,6 +1623,13 @@ void main() {
     vec3 e1 = length(u_sat) > 0.5 ? u_sat / length(u_sat) : vec3(1.0, 0.0, 0.0);
 #ifdef DO_OVL
 #ifdef ORBIT
+    vec3 ocolA = vec3(0.0);
+    vec3 ocolB = vec3(0.0);
+    float oaA = 0.0;
+    float oaB = 0.0;
+    bool backA = false;
+    bool backB = false;
+    if (length(u_sat) > 0.5) {                         // no spacecraft (sat=None): no ring
     // Exact ring. Where the projected ellipse is thin (orbit seen near edge-on)
     // a pixel lies near two sheets of the circle, the near and the far one, so
     // solve from the plane hit and from its mirror image and draw both.
@@ -1645,11 +1652,11 @@ void main() {
         tt = oda; oda = odb; odb = tt;
         tt = phiA; phiA = phiB; phiB = tt;
     }
-    vec3 ocolA, ocolB;
-    float oaA = ringStyle(Ca, tCa, oda, phiA, tc, ocolA);
-    float oaB = ringStyle(Cb, tCb, odb, phiB, tc, ocolB);
-    bool backA = tCa > tc;
-    bool backB = tCb > tc;
+    oaA = ringStyle(Ca, tCa, oda, phiA, tc, ocolA);
+    oaB = ringStyle(Cb, tCb, odb, phiB, tc, ocolB);
+    backA = tCa > tc;
+    backB = tCb > tc;
+    }
 #ifdef OVL_ONLY
     if (backB) over(ocolB, oaB * (1.0 - cover));
     if (backA) over(ocolA, oaA * (1.0 - cover));
@@ -1901,10 +1908,12 @@ void main() {
         over(TEXTC, g * 0.12 * cover);
 #endif
 #ifdef FOOTPRINT
-        float lamfp = acos(1.0 / R);
-        float cfp = acos(clamp(dot(nw, e1), -1.0, 1.0));
-        over(GOLD, (1.0 - smoothstep(lamfp - 0.002, lamfp + 0.002, cfp)) * 0.03 * cover);
-        over(GOLD, lineA(abs(cfp - lamfp) * kS, 1.1) * 0.55 * cover);
+        if (length(u_sat) > 0.5) {
+            float lamfp = acos(1.0 / R);
+            float cfp = acos(clamp(dot(nw, e1), -1.0, 1.0));
+            over(GOLD, (1.0 - smoothstep(lamfp - 0.002, lamfp + 0.002, cfp)) * 0.03 * cover);
+            over(GOLD, lineA(abs(cfp - lamfp) * kS, 1.1) * 0.55 * cover);
+        }
 #endif
 #ifdef STATIONS
         stationO(nw, u_st0, kS, cover);

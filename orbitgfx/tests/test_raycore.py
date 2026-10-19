@@ -438,6 +438,21 @@ def test_ground_camera_without_groundcam_warns_once():
 
 
 @gpu
+def test_no_spacecraft_no_ring():
+    """update(sat=None) draws no orbit ring or footprint (it used to draw the ring at
+    the surface around the equator): same pixels as a build without those layers."""
+    feats = [f for f in FEATURES if f not in ('ORBIT', 'FOOTPRINT', 'SATELLITE')]
+    out = {}
+    for name, fs in (('all', FEATURES), ('none', feats)):
+        host = _Host()
+        gv = GlobeView(host, _texture(), features=list(fs) + ['SCATTER'], quality='LOW', fill=0.44)
+        gv.layout(PANEL)
+        gv.update(Camera(az=0.7, el=0.45), np.array((0.6, -0.5, 0.62)) / 1.0, 1.1, sat=None, vel=None)
+        out[name] = scene._render_sprite(gv.node, 3.0).astype(int)
+    assert np.abs(out['all'] - out['none']).max() <= 1, np.abs(out['all'] - out['none']).max()
+
+
+@gpu
 def test_presets_build():
     sizes = {}
     for q in QUALITY:
