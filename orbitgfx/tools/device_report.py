@@ -122,8 +122,9 @@ def findings(R):
         out.append('NAN DETECTION: shaders on this device cannot see NaNs (both tests folded '
                    'away): a clean nan_scan proves nothing; compare compile/screens colours instead')
     elif vis and not vis.get('sees NaN of sqrt(x)', True):
-        out.append('NAN DETECTION: x == x is folded away here (NANCHECK misses NaNs); the abs() '
-                   'test works: switch NANCHECK to it')
+        out.append('INFO NAN DETECTION: x == x is folded away here, the abs() test works; '
+                   'NANCHECK uses !(abs(x) < limit) since 2.0.0a17, so nan_scan is valid for '
+                   'builds from 2.0.0a17 on (not for older ones)')
     slip = st.get('bench', {}).get('slip_ms')
     for r in st.get('bench', {}).get('runs', []):
         s = r['stats']

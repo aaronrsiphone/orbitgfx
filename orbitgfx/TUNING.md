@@ -73,18 +73,22 @@ frame). Section 2 has the iPhone 16 Pro Max numbers.
 | `HIGH` | ray | half | + more atmosphere/cloud/light samples, mountain shadows |
 | `ULTRA` | ray | 0.75 | HIGH with even more cloud steps (experimental) |
 
-Measured on iPhone 16 Pro Max (410 x 552 pt panel, 2.0.0a10), headroom = globes per
-60 fps frame:
+Measured on iPhone 16 Pro Max (410 x 552 pt panel, 2.0.0a17, `examples/phase_check.py`),
+headroom = globes per 60 fps frame:
 
 | Preset | overview | chase 2.6x | chase, perspective | astronaut |
 | --- | --- | --- | --- | --- |
 | LOW | x4 | x2 | x2 | x3 |
 | MED | x3 | x2 | x1 | x3 |
 | HIGH | x3 | x2 | x1 | x2 |
-| ULTRA | x2 | x1 (p95 29 ms) | 19 ms, drops frames | x1 |
+| ULTRA | x1 | x1 (p95 33 ms) | 20 ms, drops frames | x2 |
+
+One headroom step is coarse: a single cell moves by one step from run to run. ULTRA
+overview was x2 up to 2.0.0a11 and has been x1 since 2.0.0a12.
 
 The ground camera in `examples/sunset.py` is the most expensive view (every sky pixel
-marches cloud): about 20-40 fps on ULTRA.
+marches cloud). Measured with `examples/device_check.py` (2.0.0a17, phone already warm):
+MED 17 ms (p95 33), HIGH 26 ms (p95 54), ULTRA 66 ms (about 15 fps, p95 137).
 
 ### Preset keys
 
