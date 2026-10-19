@@ -87,8 +87,9 @@ One headroom step is coarse: a single cell moves by one step from run to run. UL
 overview was x2 up to 2.0.0a11 and has been x1 since 2.0.0a12.
 
 The ground camera in `examples/sunset.py` is the most expensive view (every sky pixel
-marches cloud). Measured with `examples/device_check.py` (2.0.0a17, phone already warm):
-MED 17 ms (p95 33), HIGH 26 ms (p95 54), ULTRA 66 ms (about 15 fps, p95 137).
+marches cloud). ULTRA: about 37-44 ms (23-27 fps) on a cool phone, about 65 ms (15 fps)
+once it is warm (2.0.0a17, `examples/device_check.py`); MED holds 60 fps. The phone
+throttles well before iOS reports a raised thermal state, so time it cool and briefly.
 
 ### Preset keys
 
