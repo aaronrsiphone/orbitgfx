@@ -7,6 +7,7 @@ globe its pixels are transparent, so classic panel art under it shows through.
 """
 import math
 import os
+import warnings
 
 import numpy as np
 import scene
@@ -383,6 +384,7 @@ class GlobeView(object):
         self.cloud_scale = float(cloud_scale)
         self.weather_tex = self.noise_tex = None
         self.trans_tex = None
+        self._air_r2 = None             # squared top of the air, until the ground-camera warning is armed
         if self.ray:
             if features is None:            # preset look: all 1.x layers + the preset's physics
                 feats = tuple(FEATURES) + tuple(self.preset.get('features', ()))
@@ -439,6 +441,8 @@ class GlobeView(object):
             rg, rt = planet(self.atmo_scale, RE)
             self._set('u_trans', self.trans_tex)
             self._set('u_atm', (rt / rg, rg, SUN_IRRADIANCE, MS_GAIN))
+            # a camera inside this radius needs the ground-camera shader code (GROUNDCAM)
+            self._air_r2 = None if 'GROUNDCAM' in defs else (rt / rg) ** 2
             self._set('u_haze', self.haze)
         if self.ray and set(self.features) & {'SURFACE', 'RELIEF', 'RELIEF_SHADOW'}:
             # the matching data texture (land, coast, lights) replaces the app's 1.x one
@@ -579,7 +583,13 @@ class GlobeView(object):
             persp, f, d = self.projection(camera)
             self._set('u_persp', 1.0 if persp else 0.0)
             self._set('u_focal', float(f))
-            self._set('u_campos', _vec(self.eye_position(camera, R, d)))
+            eye = self.eye_position(camera, R, d)
+            self._set('u_campos', _vec(eye))
+            if self._air_r2 is not None and persp and float(np.dot(eye, eye)) < self._air_r2:
+                self._air_r2 = None
+                warnings.warn("Camera.eye is inside the atmosphere but the view was built without "
+                              "the 'GROUNDCAM' define: the sky will render wrongly. Pass "
+                              "defines={'GROUNDCAM': '1'} (see examples/sunset.py).", stacklevel=2)
             self._set('u_exposure', float(self.exposure))
         sh.set_uniform('u_er', float(self.earth_radius(camera.zoom)))
         sh.set_uniform('u_right', _vec(R[0]))

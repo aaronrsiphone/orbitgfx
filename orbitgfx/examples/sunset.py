@@ -45,7 +45,8 @@ QUALITIES = ('ULTRA', 'HIGH', 'MED')
 # cloud noise 8x finer than the orbit view: cells of ~10 km, detail ~1 km, so clouds
 # have shapes you can see from under them (the "not to scale" part)
 GROUND = {'LIMB_GAIN': '1.0', 'NOISE_F': '640.0', 'NOISE_FD': '5200.0', 'NOISE_V': '72.0',
-          'CI_F': '440.0', 'CI_WF': '240.0', 'BASE_AMT': '0.85'}
+          'CI_F': '440.0', 'CI_WF': '240.0', 'BASE_AMT': '0.85',
+          'GROUNDCAM': '1'}      # the eye is inside the air: compiles the ground-camera code
 # (name, latitude, longitude, weather-film frame): picked from the film where the
 # cloud the camera looks at, just toward the sun, is of that kind at sunset
 SITES = (

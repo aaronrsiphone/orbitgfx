@@ -277,6 +277,42 @@ def test_sun_direction_refracted():
 
 
 @gpu
+def test_refraction_fade_and_sunT_shortcut():
+    """refrSin() returns s exactly from 0.25 (14.5 deg) up and fades the lift smoothly to
+    zero between 0.15 and 0.25 (no jump beyond the neighbouring steps); sunT() is exactly
+    0 for a sun more than 0.03 below the point's horizon, and equals sunTa(refrSin()) in
+    the band just above it, so the shortcut changes nothing."""
+    import re
+    from orbitgfx.tests._gpu import gpu_eval
+    src = build_ray_shader(('SCATTER', 'REFRACTION'), None, 'single')
+    ta = re.search(r'vec3 sunTa\(.*?\n\}\n.*?vec3 sunT\(.*?\n\}\n', src, re.S).group(0)
+    lib = (_refraction_lib() + 'vec3 transmittance(float r, float mu) { return vec3(1.0); }\n'
+           + ta)
+    defs = ('SCATTER', 'REFRACTION')
+    for r in (1.0, 1.0004):
+        u = {'u_atm': (1.0 + 100.0 / RE, RE, 1.0, 0.0)}
+        _, hi = gpu_eval(lib, 'refrSin(%r, x) - x' % r, 0.25, 1.0, 400, u, defs)
+        assert np.all(hi == 0.0), (r, np.abs(hi).max())        # exactly s, not just close
+        xs, lo = gpu_eval(lib, 'refrSin(%r, x) - x' % r, 0.10, 0.30, 2001, u, defs)
+        step = np.abs(np.diff(lo))
+        assert lo[xs <= 0.15].min() > 1e-3, r                  # full lift below the fade
+        assert np.abs(lo[xs >= 0.25]).max() < 2e-7, r          # none above (float noise)
+        assert np.diff(lo[(xs >= 0.15) & (xs <= 0.25)]).max() < 2e-7, r    # only falls
+        assert step.max() < 2.0 * np.median(step[xs[:-1] > 0.16]) + 1e-6, (r, step.max())
+        assert abs(lo[0]) > 0 and np.all(lo[xs < 0.15] > 0), r
+    # sunT: the shortcut is exact
+    for r in (1.0, 1.0004, 1.02, 1.5):
+        muh = -math.sqrt(1.0 - 1.0 / (r * r))
+        u = {'u_atm': (1.0 + 100.0 / RE, RE, 1.0, 0.0)}
+        xs, below = gpu_eval(lib, 'sunT(%r, x).x' % r, -1.0, muh - 0.0301, 200, u, defs)
+        assert np.all(below == 0.0), r
+        xs, got = gpu_eval(lib, 'sunT(%r, x).x' % r, muh - 0.1, muh + 0.05, 600, u, defs)
+        _, ref = gpu_eval(lib, 'sunTa(%r, refrSin(%r, x)).x' % (r, r), muh - 0.1, muh + 0.05,
+                          600, u, defs)
+        assert np.array_equal(got, ref), (r, np.abs(got - ref).max())
+
+
+@gpu
 def test_refraction_lights_the_ground():
     """REFRACTION moves the ground's sunlight with the sun it lifts: just after the
     geometric sunset the sea is still sunlit (it was black before, because only the
@@ -308,6 +344,97 @@ def test_refraction_lights_the_ground():
     # still above the horizon either way: the lifted sun is a little brighter
     assert out[(0.6, True)] > out[(0.6, False)], out
     return {'%+.2f %s' % (e, 'on' if r else 'off'): round(v, 4) for (e, r), v in out.items()}
+
+
+def test_nancheck_survives_fast_math():
+    """On device, Apple's compiler folds `x == x` to true (fast-math), so NANCHECK must use
+    comparisons a NaN fails: !(abs(x) < limit)."""
+    import re
+    src = build_ray_shader(('SCATTER',), None, 'single', ('NANCHECK',))
+    code = re.sub(r'//[^\n]*', '', src)
+    assert not re.search(r'\b(\w+(?:\([^()]*\))?)\s*==\s*\1\b', code), 'self-comparison in shader'
+    assert 'g_bad' in code and '!(abs(a) < 1e6)' in code
+
+
+def _without_groundcam(src):
+    """The source as the compiler sees it with GROUNDCAM undefined (only the #ifdef
+    GROUNDCAM / #else / #endif blocks are resolved)."""
+    out, skip, depth = [], False, 0
+    for line in src.splitlines():
+        t = line.strip()
+        if t.startswith(('#if', '#ifdef', '#ifndef')):
+            depth += 1 if skip else 0
+            if not skip and t == '#ifdef GROUNDCAM':
+                skip, depth = True, 1
+                continue
+        elif skip and t.startswith('#else') and depth == 1:
+            skip = False
+            continue
+        elif t.startswith('#endif') and skip:
+            depth -= 1
+            skip = depth > 0
+            continue
+        if not skip:
+            out.append(line)
+    return '\n'.join(out)
+
+
+def test_groundcam_code_only_in_ground_builds():
+    """The ground-camera code (cloud depth, near-cloud detail, sun disc, ...) is behind
+    GROUNDCAM, so an orbit shader is the smaller, pre-ground-camera one."""
+    for p in PASSES:
+        orbit_src = build_ray_shader(RAY_FEATURES, None, p)
+        ground = build_ray_shader(RAY_FEATURES, None, p, defines={'GROUNDCAM': '1'})
+        assert not lint_glsl(ground), lint_glsl(ground)
+        if p != 'overlay':
+            code = _without_groundcam(orbit_src)
+            assert 'g_ct' in ground and 'g_ct' in orbit_src, p
+            for name in ('g_ct', 'g_near', 'inAir', 'starsOn = dot'):
+                assert name not in code, (p, name)
+        assert len(orbit_src) < len(ground), p
+
+
+def _ground_cam():
+    up = np.array((0.6, 0.0, 0.8))
+    east = np.array((0.0, 1.0, 0.0))
+    north = np.cross(up, east)
+    cam = Camera(fov_deg=75.0)
+    cam.eye = up * (1.0 + 2.0 / 6371.0)
+    cam.look = cam.eye + north * 0.05 + up * 0.004
+    return cam, np.cos(0.02) * north + np.sin(0.02) * up
+
+
+@gpu
+def test_sunset_ground_spec_renders():
+    """sunset.py's ground camera (its GROUND defines, MED) compiles and draws a sky."""
+    from orbitgfx.examples import sunset as SS
+    assert SS.GROUND.get('GROUNDCAM') == '1'
+    cam, sun = _ground_cam()
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        out, gv = view('MED', SS.FEATURES, cam=cam, sun=sun, perspective=True, atmo_scale=1.0,
+                       cloud_scale=1.0, inset=0.0, exposure=SS.EXPOSURE, defines=dict(SS.GROUND))
+    for name, img in out.items():
+        assert np.isfinite(img).all(), name
+    img = out.get('radiance', out['overlay'])
+    h, w = img.shape[:2]
+    mid = img[h // 2 - 40:h // 2 + 40, w // 2 - 40:w // 2 + 40]
+    assert mid[..., :3].mean() > 0.02 and mid[..., :3].std() > 0.0     # a lit sky, not black
+
+
+@gpu
+def test_ground_camera_without_groundcam_warns_once():
+    cam, sun = _ground_cam()
+    kw = dict(cam=cam, sun=sun, perspective=True, atmo_scale=1.0)
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter('always')
+        view('MED', RAY_FEATURES, **kw)
+    assert sum('GROUNDCAM' in str(x.message) for x in w) == 1, [str(x.message) for x in w]
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter('always')
+        view('MED', RAY_FEATURES, defines={'GROUNDCAM': '1'}, **kw)
+        view('MED', RAY_FEATURES, cam=Camera(az=0.7, el=0.45), sun=sun)      # an orbit view
+    assert not [x for x in w if 'GROUNDCAM' in str(x.message)]
 
 
 @gpu

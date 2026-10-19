@@ -231,7 +231,10 @@ Camera(fov_deg=50, distance=1.2)                 # or set the projection on the 
     radii, ECI) are a general look-at camera: screen-up follows the local
     vertical, and a view straight along it (nadir or zenith) falls back to a
     fixed axis instead of producing NaNs; `eye == look` or a missing `look`
-    raises `ValueError`. `cam.step()` only clears an eye that astronaut mode
+    raises `ValueError`. An eye inside the atmosphere (a ground camera) needs
+    `GlobeView(defines={'GROUNDCAM': '1'})`, which compiles the ground-camera
+    shader code (off by default so orbit views stay fast); without it the view
+    warns once and the sky renders wrongly. `cam.step()` only clears an eye that astronaut mode
     placed, never one the app set. The ring and marker are hidden
     while riding the spacecraft. In `examples/mission_control.py` (ray
     qualities) double tap cycles FREE, TRACK, ASTRO.

@@ -578,7 +578,9 @@ bool g_bad = false;
 #endif
 void over(vec3 c, float a) {
 #ifdef NANCHECK
-    if (!(a == a) || !(dot(c, c) == dot(c, c)) || abs(a) > 1e6 || dot(c, c) > 1e12) g_bad = true;
+    // NaN fails every comparison, so test with !(x < limit). `x == x` is folded away by
+    // Apple's shader compiler (fast-math), which hid every NaN from this check on device.
+    if (!(abs(a) < 1e6) || !(dot(c, c) < 1e12)) g_bad = true;
 #endif
     a = clamp(a, 0.0, 1.0);
     acc = vec4(c * a + acc.rgb * (1.0 - a), a + acc.a * (1.0 - a));
@@ -653,10 +655,15 @@ float refrDegAt(float r, float e) {
     return R;
 }
 // sine of the elevation the sun appears at, seen from radius r with the true value s
+// Above 10 deg the lift is under 0.09 deg and invisible: it fades out smoothly between
+// sin(elevation) 0.15 and 0.25 (8.6 to 14.5 deg) and s is returned untouched above that,
+// before any of the expensive work.
 float refrSin(float r, float s) {
-    if (s >= 0.0 && altitudeKm(r) > 40.0) return s;
+    if (s >= 0.25 || (s >= 0.0 && altitudeKm(r) > 40.0)) return s;
     float e = degrees(asin(clamp(s, -1.0, 1.0)));
-    return sin(radians(min(e + refrDegAt(r, e), 90.0)));
+    float dl = radians(refrDegAt(r, e) * (1.0 - smoothstep(0.15, 0.25, s)));
+    // sin(e + dl) by the angle-sum rule: exactly s when the lift is 0, so no seam at 0.25
+    return min(s * cos(dl) + sqrt(max(1.0 - s * s, 0.0)) * sin(dl), 1.0);
 }
 #endif
 // The sun's direction as seen from a point with local vertical up (unit) at radius r:
@@ -857,6 +864,10 @@ vec3 sunTa(float r, float mua) {
 // sunlight reaching radius r with the sun at TRUE cos-zenith mus
 vec3 sunT(float r, float mus) {
 #ifdef REFRACTION
+    // refraction lifts the sun by 1.2 deg at most (limbBend(0) = 0.0203 rad), so a sun
+    // more than 0.03 below the point's horizon gets no light either way: skip the lift
+    float muh = -sqrt(max(1.0 - 1.0 / (r * r), 0.0));
+    if (mus < muh - 0.03) return vec3(0.0);
     mus = refrSin(r, mus);                    // the air lifts the low sun: light lasts longer
 #endif
     return sunTa(r, mus);
@@ -1070,7 +1081,9 @@ vec3 warpW(vec3 q) {
     return q + n * WARP_AMT;
 }
 // cloud density at weather-frame point q, normalised shell height hn, weather w
+#ifdef GROUNDCAM
 float g_near = 0.0;                       // > 0: the cloud is close (camera on the ground)
+#endif
 float cloudDens(vec3 q, float hn, vec3 w, float dk) {
     if (hn < 0.0 || hn > 1.0 || w.r < 0.02) return 0.0;
     float th = clamp(0.35 + 0.75 * w.r, 0.35, 1.0);                   // dense cover = deep cloud
@@ -1098,12 +1111,14 @@ float cloudDens(vec3 q, float hn, vec3 w, float dk) {
         // fair-weather cumulus: broken convective cover splits into separate puffs
         float pop = smoothstep(0.50, 0.80, w.g) * (1.0 - smoothstep(0.30, 0.65, w.r)) * dk;
         s *= mix(1.0, smoothstep(0.42, 0.72, dn.b), pop);
+#ifdef GROUNDCAM
         if (g_near > 0.0 && s > 0.0) {
             // seen from close by: a finer octave (~1.5 km) frays edges into turrets and wisps
             vec3 dn2 = noise3(q * (NOISE_FD * 5.3) + vec3(3.0, 7.0, 1.0) - vec3(0.5, 0.2, -0.3) * u_cld.w);
             float f2 = mix(dn2.g, 1.0 - dn2.g, clamp(hn * 6.0, 0.0, 1.0) * DETAIL_BILLOW) * 0.7 + dn2.b * 0.3;
             s = remap01(s, f2 * 0.35 * g_near * (1.0 - 0.6 * s), 1.0);
         }
+#endif
     }
 #endif
     return s * mix(0.55, 1.0, th);
@@ -1130,11 +1145,15 @@ float ign(vec2 f) { return fract(52.9829189 * fract(dot(f, vec2(0.06711056, 0.00
 
 // March the cloud shell in front of the ground (or through it, above the limb).
 // Lc: cloud radiance (HDR), Tc: transmittance through the clouds.
+#ifdef GROUNDCAM
 float g_ct = 0.0;                         // opacity-weighted depth of the cloud along the ray
+#endif
 void cloudMarch(vec3 ro, vec3 rd, bool hitE, float tE, out vec3 Lc, out float Tc) {
     Lc = vec3(0.0);
     Tc = 1.0;
+#ifdef GROUNDCAM
     g_ct = 0.0;
+#endif
     float thick = u_cld.y - u_cld.x;
     vec2 so = sphere(ro, rd, 1.0 + u_cld.y);
     if (so.x > so.y || so.y <= 0.0) return;
@@ -1151,11 +1170,15 @@ void cloudMarch(vec3 ro, vec3 rd, bool hitE, float tE, out vec3 Lc, out float Tc
     // places whatever the camera does. Rays that only graze the shell above the limb
     // march evenly in t. No screen-space jitter: it made thin cloud boil on camera moves.
     bool down = hitE || (si.x <= si.y && si.x > t0);
+#ifdef GROUNDCAM
     // from inside or under the shell: steps grow with distance (dense close by)
     bool near = !down && dot(ro, ro) < (1.0 + u_cld.y) * (1.0 + u_cld.y);
+#endif
 
     float n = down ? float(CLOUD_NS) : floor(clamp(seg / thick * CLOUD_NB, CLOUD_NMIN, float(CLOUD_N)));
+#ifdef GROUNDCAM
     if (near) n = float(CLOUD_N);
+#endif
     float dt0 = seg / n;
     vec3 re = ro + rd * t0;                 // re-based origin: precise slab intersections
     float tprev = 0.0;
@@ -1188,10 +1211,12 @@ void cloudMarch(vec3 ro, vec3 rd, bool hitE, float tE, out vec3 Lc, out float Tc
             t = t0 + sphere(re, rd, 1.0 + u_cld.x + thick * (1.0 - (fi + 0.5) / n)).x;
             dt = tb - tprev;
             tprev = tb;
+#ifdef GROUNDCAM
         } else if (near) {
             float u = (float(i) + 0.5) / n;
             t = t0 + seg * u * u;
             dt = 2.0 * u * seg / n;
+#endif
         } else {
             t = t0 + (float(i) + 0.5) * dt0;
             dt = dt0;
@@ -1201,9 +1226,13 @@ void cloudMarch(vec3 ro, vec3 rd, bool hitE, float tE, out vec3 Lc, out float Tc
         float hn = (r - 1.0 - u_cld.x) / thick;
         vec3 w = weatherAt(warpW(q));
         if (w.r < 0.02) continue;                          // clear sky: skip the noise
+#ifdef GROUNDCAM
         g_near = near ? 1.0 - smoothstep(0.0004, 0.0012, pixw(t)) : 0.0;
         float d = cloudDens(q, hn, w, near ? max(dk, 1.0 - smoothstep(0.002, 0.006, pixw(t))) : dk);
         g_near = 0.0;
+#else
+        float d = cloudDens(q, hn, w, dk);
+#endif
         if (d <= 0.0) continue;
         float sig = u_cld.z * d;
         float od = lightOD(q, sw, w, thick) * u_cld.z;
@@ -1225,10 +1254,14 @@ void cloudMarch(vec3 ro, vec3 rd, bool hitE, float tE, out vec3 Lc, out float Tc
 #endif
         float a = 1.0 - exp(-sig * dt);
         Lc += Tc * S * a;
+#ifdef GROUNDCAM
         g_ct += Tc * a * t;
+#endif
         Tc *= 1.0 - a;
     }
+#ifdef GROUNDCAM
     g_ct /= max(1.0 - Tc, 1e-4);
+#endif
 }
 // High, thin cirrus at the top of the shell: fibrous streaks stretched along the
 // latitude circles (the jet direction), amount from the weather map's B channel.
@@ -1238,10 +1271,12 @@ float cirrus(vec3 ro, vec3 rd, out vec3 L) {
     float rci = 1.0 + u_cld.y * 1.04;
     vec2 sc = sphere(ro, rd, rci);
     if (sc.x > sc.y || sc.y <= 0.0) return 0.0;
+#ifdef GROUNDCAM
     if (sc.x < 0.0) {                                  // under the layer: rays into the ground see none
         vec2 sg = sphere(ro, rd, 1.0);
         if (sg.x <= sg.y && sg.y > 0.0) return 0.0;
     }
+#endif
     float tci = sc.x > 0.0 ? sc.x : sc.y;
     vec3 p = ro + rd * tci;
     vec3 qc = wframe(p);
@@ -1366,18 +1401,26 @@ float ringSolve(float phi, vec3 ro, vec3 rd, vec3 e1, float R, out vec3 C, out f
 }
 // colour and coverage of the ring at a solved point (trail, eclipse, far side)
 float ringStyle(vec3 C, float tC, float od, float phi, float tc, out vec3 ocol) {
-    bool back = tC > tc;                      // behind the limb plane (legacy cdepth < 0)
+    float ow = 1.15;
+    float frac = -1.0;
+    bool inTrail = false;
     phi = mod(phi + PI, 2.0 * PI) - PI;
-    float frac = u_trail > 1e-4 ? 1.0 + phi / u_trail : -1.0;
-    bool inTrail = phi <= 0.0 && frac >= 0.0;
+    if (u_trail > 1e-4) {
+        frac = 1.0 + phi / u_trail;
+        inTrail = phi <= 0.0 && frac >= 0.0;
+    }
+    if (inTrail) ow = 1.1 + 1.8 * frac;
+    float a = tC > 0.0 && od < 1e8 ? lineA(od, ow) * (inTrail ? 1.0 : 0.9) : 0.0;
+    ocol = vec3(0.0);
+    if (a <= 0.0) return 0.0;                 // off the line: skip the sun visibility work
+    bool back = tC > tc;                      // behind the limb plane (legacy cdepth < 0)
 #ifdef PENUMBRA
     vec3 oc = eclipseTint(CYAN, sunVis(C));
 #else
     vec3 oc = inShadow(C) ? ECLC : CYAN;
 #endif
-    float ow = inTrail ? 1.1 + 1.8 * frac : 1.15;
     ocol = inTrail ? mix(oc, BGC, 0.70 * (1.0 - frac)) : mix(oc, BGC, back ? 0.62 : 0.36);
-    return tC > 0.0 && od < 1e8 ? lineA(od, ow) * (inTrail ? 1.0 : 0.9) : 0.0;
+    return a;
 }
 #endif
 
@@ -1445,8 +1488,12 @@ void main() {
     } else {
         // stars fixed on the sky: cells in (azimuth, elevation) of the ray; from the
         // ground only once the sun is well below the horizon
+#ifdef GROUNDCAM
         float starsOn = dot(u_campos, u_campos) < 1.05 ?
             1.0 - smoothstep(-0.20, -0.08, dot(normalize(u_campos), u_sun)) : 1.0;
+#else
+        const float starsOn = 1.0;
+#endif
         float el = asin(clamp(rd.z, -1.0, 1.0));
         float ce = max(cos(el), 1e-3);
         vec2 sp = vec2(atan(rd.y, rd.x) * ce, el) * u_focal;
@@ -1476,7 +1523,9 @@ void main() {
     vec3 Lsky = vec3(0.0);
     vec3 Tv = vec3(1.0);
     vec2 ah = sphere(ro, rd, u_atm.x);
-    bool inAir = u_persp > 0.5 && dot(ro, ro) < u_atm.x * u_atm.x;
+#ifdef GROUNDCAM
+    bool inAir = u_persp > 0.5 && dot(ro, ro) < u_atm.x * u_atm.x;     // camera inside the air
+#endif
     if (ah.x <= ah.y && ah.y > 0.0) {
         float ta = max(ah.x, 0.0);
         float tb = hit ? tE : ah.y;
@@ -1515,16 +1564,26 @@ void main() {
     // air between the eye and the cloud: from space, half the path (sqrt); from inside
     // the air (a camera on the ground) the fraction of the path up to the cloud
     vec3 Tcv = hit ? Tv : sqrt(Tv);
+#ifdef GROUNDCAM
     if (inAir) Tcv = pow(max(Tv, vec3(1e-6)), vec3(clamp(g_ct / max(ah.y, 1e-6), 0.0, 1.0)));
     // the air light in front of the cloud stays: about half from orbit; from the ground,
     // the share of the path up to the cloud
     vec3 front = inAir ? (1.0 - Tcv) / max(1.0 - Tv, vec3(1e-4)) : vec3(0.55);
+#else
+    // the air light in front of the cloud stays: about half
+    vec3 front = vec3(0.55);
+#endif
     Lsky = Lsky * (Tcl + (1.0 - Tcl) * clamp(front, 0.0, 1.0)) + Lcl * Tcv;
     vec3 Lci;
     float aci = cirrus(ro, rd, Lci);
+#ifdef GROUNDCAM
     Lsky = Lsky * (1.0 - aci) + Lci * (inAir ? sqrt(Tv) : Tcv);
+#else
+    Lsky = Lsky * (1.0 - aci) + Lci * Tcv;
+#endif
     Tcl *= 1.0 - aci;
 #endif
+#ifdef GROUNDCAM
     if (inAir && !hit) {
         // the sun's disc seen from inside the air (drawn 2x its true 0.27 degree radius),
         // reddened by the air it crosses and hidden by cloud
@@ -1550,6 +1609,7 @@ void main() {
         // the line of sight to the disc is already the refracted ray: no second lift
         Lsky += sunTa(length(ro), dot(upo, rd)) * (sd * 40.0 + glow) * u_atm.z * Tcl;
     }
+#endif
     vec3 skyc = tonemapL(Lsky);
     overP(skyc, max(1.0 - Tcl, max(skyc.r, max(skyc.g, skyc.b))));
 #else
@@ -1876,9 +1936,15 @@ void main() {
 #endif
     if (satVis) {
 #ifdef PENUMBRA
-        vec3 sv = sunVis(u_sat);
-        vec3 sc = eclipseTint(GOLD, sv);
-        float svl = dot(sv, vec3(0.3, 0.5, 0.2));
+        float dm = dot(pt - ps, pt - ps);
+        vec3 sv = vec3(0.0);
+        vec3 sc = vec3(0.0);
+        float svl = 0.0;
+        if (dm < 5300.0) {                     // the glow exp(-d*d/60) underflows beyond this
+            sv = sunVis(u_sat);
+            sc = eclipseTint(GOLD, sv);
+            svl = dot(sv, vec3(0.3, 0.5, 0.2));
+        }
 #else
         vec3 sv = inShadow(u_sat) ? vec3(0.0) : vec3(1.0);
         vec3 sc = inShadow(u_sat) ? ECLC : GOLD;
@@ -1911,7 +1977,7 @@ void main() {
 #endif
 
 #ifdef NANCHECK
-    if (g_bad || !(dot(acc, acc) == dot(acc, acc))) acc = vec4(1.0, 0.0, 1.0, 1.0);
+    if (g_bad || !(dot(acc, acc) < 1e12)) acc = vec4(1.0, 0.0, 1.0, 1.0);
 #endif
     gl_FragColor = acc;
 }
