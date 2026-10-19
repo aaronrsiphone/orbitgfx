@@ -14,8 +14,15 @@ float maths, real frame times, memory and heat. About 8 minutes (QUICK: about 3)
 If it freezes for more than a minute or Pythonista quits, force-quit, run it again:
 it skips the step that failed and says so in the report.
 
+Smoke run first (examples/device_smoke.py, or SMOKE = True below, about a minute):
+every module parsed and imported, every shader variant compiled, every stage and
+every device call (capture, memory, heat, zip, share) exercised once with no
+timing, so a crash shows up in a minute instead of halfway through. It writes
+orbitgfx_device_smoke.zip, separately from the full report.
+
 Stages (each writes into report.json as it finishes):
   info          device, iOS, Pythonista, screen
+  imports       every orbitgfx .py parsed; every device module imported
   pacing        display frame interval; update() vs draw() calls per frame
   capture       a way to read the screen back, and its colour response
   compile       every preset and feature set through the real shader compiler,
@@ -47,13 +54,18 @@ except ImportError:
     import orbitgfx  # noqa: F401
 import scene
 from orbitgfx import GlobeView, Camera, cached_earth_image, pil_texture, safety
-from orbitgfx.astro import RE, refraction_deg
+from orbitgfx.astro import RE
+try:
+    from orbitgfx.astro import refraction_deg
+except ImportError:                # an older build (2.0.0a16): the GPU-maths stage is skipped
+    refraction_deg = None
 from orbitgfx.examples.phase_check import mission_panel, orbit
 from orbitgfx.examples import sunset as SS
 from orbitgfx.views import QUALITY
 
 QUICK = False                      # True: fewer poses and shorter timings (~3 minutes)
-ONLY = None                        # e.g. ('info', 'pacing', 'bench'): run just these stages
+SMOKE = False                      # True: every code path once, no timing (~1 minute)
+ONLY = None                        # e.g. ('bench', 'refraction'): run just these stages (+ info, imports, pacing, capture)
 VERSION = 1                        # report format
 TOP_INSET = 64
 BG = (0.023, 0.039, 0.078)
@@ -65,6 +77,16 @@ FEATURE_SETS = (('all', None), ('none', ()), ('orbit', ('ORBIT', 'SATELLITE')),
                 ('atmo_tonemap', ('ATMOSPHERE', 'TONEMAP')), ('orbit_refr', ('ORBIT', 'REFRACTION')),
                 ('atmo_refr', ('ATMOSPHERE', 'REFRACTION')))
 HEADROOM_STEPS = (1, 2, 3, 5)
+
+
+def W(full, smoke=0.05):
+    """A wait or timing length: `full` normally, `smoke` in a smoke run."""
+    return smoke if SMOKE else full
+
+
+def pick(full, smoke):
+    """A list of cases: all of `full` normally, the representative `smoke` ones in a smoke run."""
+    return smoke if SMOKE else full
 SITE = 3                           # sunset.py's Bismarck Sea thunderstorms
 SCREEN_SCALE = 1.5                 # pixels per point of the saved screens (zip size)
 
@@ -75,7 +97,7 @@ OUT_BASE = None                    # folder for the report; None: Pythonista's t
 def out_dir():
     docs = os.path.expanduser('~/Documents')
     base = OUT_BASE or (docs if os.path.isdir(docs) else os.path.dirname(os.path.abspath(__file__)))
-    d = os.path.join(base, 'orbitgfx_device_report')
+    d = os.path.join(base, 'orbitgfx_device_smoke' if SMOKE else 'orbitgfx_device_report')
     os.makedirs(os.path.join(d, 'screens'), exist_ok=True)
     return d
 
@@ -198,8 +220,10 @@ def probes():
             lambda x: x, 0.01),
            ('asin(sin) deg', 'degrees(asin(clamp(sin(radians(x)), -1.0, 1.0)))', -5.0, 10.0,
             -6.0, 11.0, km1, lambda x: x, 2e-3),
-           ('apparent elev h0', 'degrees(asin(refrSin(1.0, sin(radians(x)))))', -3.0, 10.0,
-            -3.0, 11.0, km1, lambda x: x + refraction_deg(x, 0.0, km1), 2e-3),
+           # up to 8 deg only: refrSin fades the lift out between 8.6 and 14.5 deg, which
+           # the plain Saemundsson reference below does not
+           ('apparent elev h0', 'degrees(asin(refrSin(1.0, sin(radians(x)))))', -3.0, 8.0,
+            -3.0, 9.0, km1, lambda x: x + refraction_deg(x, 0.0, km1), 2e-3),
            # informational: what pow() of a negative base gives here (README rule 1;
            # Mesa: NaN for 5.0 and 2.5, but x * x for 2.0, which compilers rewrite),
            # whether 1 - z can round below 0 (sqrt(1.0), a normalised dot), and whether
@@ -263,7 +287,7 @@ class Capture(object):
     def candidates(self):
         if hasattr(scene, 'SandboxError'):
             return ['sandbox']
-        return [m for m in ('textureFromNode', 'drawViewHierarchy') if m not in self.skip]
+        return [m for m in ('textureFromNode', 'drawViewHierarchy', 'windowSnapshot') if m not in self.skip]
 
     def grab(self, method=None):
         m = method or self.method
@@ -290,16 +314,100 @@ class Capture(object):
         raw = ctypes.string_at(data.bytes(), data.length())
         return np.asarray(Image.open(io.BytesIO(raw)).convert('RGBA'))
 
-    def _skview(self):
+    def _roots(self):
+        """Candidate UIViews to search from: the scene's view (as a ui.View and as its raw
+        pointer), then the app's key window."""
         from objc_util import ObjCClass, ObjCInstance
+        roots = []
+        v = getattr(self.host, 'view', None)
+        for make in (lambda: ObjCInstance(v), lambda: ObjCInstance(v._objc_ptr)):
+            try:
+                roots.append(make())
+            except Exception:
+                pass
+        try:
+            app = ObjCClass('UIApplication').sharedApplication()
+            win = app.keyWindow()
+            if win is None:
+                win = app.windows()[0]
+            roots.append(win)
+        except Exception:
+            pass
+        return roots
+
+    def hierarchy(self, limit=80):
+        """Class names of the view tree (up from the scene view, then down), for the report."""
+        out, seen = [], set()
+        for root in self._roots():
+            top = root
+            for _ in range(20):
+                sup = top.superview() if hasattr(top, 'superview') else None
+                if sup is None:
+                    break
+                top = sup
+            todo = [(top, 0)]
+            while todo and len(out) < limit:
+                v, d = todo.pop(0)
+                if int(v.ptr.value if hasattr(v.ptr, 'value') else v.ptr) in seen:
+                    continue
+                seen.add(int(v.ptr.value if hasattr(v.ptr, 'value') else v.ptr))
+                out.append('%s%s' % ('  ' * d, str(v._get_objc_classname())
+                                     if hasattr(v, '_get_objc_classname') else type(v).__name__))
+                if d < 6:
+                    todo = [(c, d + 1) for c in v.subviews()] + todo
+        return out
+
+    def _skview(self):
+        """The SKView: searched in the scene view's subtree, then up its superviews and
+        down from the top, then from the key window (Pythonista 3.4 / recent iOS does
+        not always put it below scene.view)."""
+        from objc_util import ObjCClass
         SKView = ObjCClass('SKView')
-        todo = [ObjCInstance(self.host.view)]
-        while todo:
-            v = todo.pop(0)
-            if v.isKindOfClass_(SKView):
-                return v
-            todo.extend(v.subviews())
-        raise RuntimeError('no SKView under the scene view')
+        for root in self._roots():
+            top = root
+            for _ in range(20):
+                sup = top.superview()
+                if sup is None:
+                    break
+                top = sup
+            for start in (root, top):
+                todo = [start]
+                while todo:
+                    v = todo.pop(0)
+                    if v.isKindOfClass_(SKView):
+                        return v
+                    todo.extend(v.subviews())
+        raise RuntimeError('no SKView in the view hierarchy:\n' + '\n'.join(self.hierarchy()))
+
+    def _top_view(self):
+        """The topmost UIView above the scene view (the window)."""
+        roots = self._roots()
+        if not roots:
+            raise RuntimeError('no view or window to snapshot')
+        top = roots[-1]
+        for _ in range(20):
+            sup = top.superview()
+            if sup is None:
+                break
+            top = sup
+        return top
+
+    def _snapshot(self, view):
+        import ctypes
+        from objc_util import CGSize, ObjCInstance
+        b = view.bounds()
+        lib = ctypes.CDLL(None)
+        lib.UIGraphicsBeginImageContextWithOptions.argtypes = [CGSize, ctypes.c_bool, ctypes.c_double]
+        lib.UIGraphicsGetImageFromCurrentImageContext.restype = ctypes.c_void_p
+        lib.UIGraphicsBeginImageContextWithOptions(CGSize(b.size.width, b.size.height), True, 0.0)
+        try:
+            view.drawViewHierarchyInRect_afterScreenUpdates_(b, True)
+            img = ObjCInstance(lib.UIGraphicsGetImageFromCurrentImageContext())
+        finally:
+            lib.UIGraphicsEndImageContext()
+        if img is None:
+            raise RuntimeError('snapshot returned nil')
+        return self._png_to_array(img)
 
     def _textureFromNode(self):
         from objc_util import ObjCClass
@@ -311,20 +419,12 @@ class Capture(object):
         return self._png_to_array(img)
 
     def _drawViewHierarchy(self):
-        import ctypes
-        from objc_util import CGSize, ObjCInstance
-        sk = self._skview()
-        b = sk.bounds()
-        lib = ctypes.CDLL(None)
-        lib.UIGraphicsBeginImageContextWithOptions.argtypes = [CGSize, ctypes.c_bool, ctypes.c_double]
-        lib.UIGraphicsGetImageFromCurrentImageContext.restype = ctypes.c_void_p
-        lib.UIGraphicsBeginImageContextWithOptions(CGSize(b.size.width, b.size.height), True, 0.0)
-        try:
-            sk.drawViewHierarchyInRect_afterScreenUpdates_(b, True)
-            img = ObjCInstance(lib.UIGraphicsGetImageFromCurrentImageContext())
-        finally:
-            lib.UIGraphicsEndImageContext()
-        return self._png_to_array(img)
+        return self._snapshot(self._skview())
+
+    def _windowSnapshot(self):
+        """The whole window, status bar area included: scene points map 1:1 only if the
+        scene is full screen (the default of scene.run), which the solid-colour test checks."""
+        return self._snapshot(self._top_view())
 
     def px(self, x, y):
         """Scene point (y up) -> pixel (col, row)."""
@@ -454,8 +554,13 @@ def summarize(R):
     """The short text summary of a report (clipboard, summary.txt, device_report)."""
     st = R['stages']
     info = st.get('info', {})
-    lines = ['ORBITGFX DEVICE CHECK  orbitgfx %s  %s iOS %s  Pythonista %s' % (
-        info.get('orbitgfx'), info.get('machine'), info.get('ios'), info.get('pythonista'))]
+    lines = ['ORBITGFX DEVICE %s  orbitgfx %s  %s iOS %s  Pythonista %s' % (
+        'SMOKE RUN (no timing)' if R.get('smoke') else 'CHECK', info.get('orbitgfx'),
+        info.get('machine'), info.get('ios'), info.get('pythonista'))]
+    im = st.get('imports', {})
+    if im:
+        lines.append('imports: %s parsed, %d imported, failed: %s' % (
+            im.get('parsed'), len(im.get('imported', [])), ', '.join(sorted(im.get('failed', {}))) or 'none'))
     pc = st.get('pacing', {})
     lines.append('frame %s ms  updates/draws %s/%s  capture %s' % (
         pc.get('target_ms'), pc.get('updates'), pc.get('draws'), st.get('capture', {}).get('method')))
@@ -507,7 +612,7 @@ class DeviceCheck(scene.Scene):
         self.hdr.z_position = self.sub.z_position = 10
         self.dir = out_dir()
         self.guard = Guard(os.path.join(self.dir, '.running.json'))
-        self.report = {'format': VERSION, 'quick': QUICK, 'started': time.strftime('%Y-%m-%d %H:%M:%S'),
+        self.report = {'format': VERSION, 'quick': QUICK, 'smoke': SMOKE, 'started': time.strftime('%Y-%m-%d %H:%M:%S'),
                        'scene_size': [w, h], 'panel': list(self.panel),
                        'skipped_after_crash': self.guard.crashed, 'stages': {}, 'vitals': [],
                        'errors': {}}
@@ -629,17 +734,21 @@ class DeviceCheck(scene.Scene):
 
     # ------------------------------------------------------------ stages
     def run(self):
-        stages = [('info', self.st_info), ('pacing', self.st_pacing), ('capture', self.st_capture),
+        stages = [('info', self.st_info), ('imports', self.st_imports), ('pacing', self.st_pacing),
+                  ('capture', self.st_capture),
                   ('compile', self.st_compile), ('nan_scan', self.st_nan), ('gpu_math', self.st_math),
                   ('screens', self.st_screens), ('bench', self.st_bench),
                   ('refraction', self.st_refraction), ('weather', self.st_weather)]
         self.save()
         for name, fn in stages:
-            if ONLY is not None and name not in ONLY and name not in ('info', 'pacing', 'capture'):
+            if ONLY is not None and name not in ONLY and name not in ('info', 'imports', 'pacing', 'capture'):
                 continue
             key = 'stage:' + name
             if key in self.guard.crashed:
                 self.report['stages'][name] = {'skipped': 'crashed or hung on the previous run'}
+                continue
+            if name == 'gpu_math' and refraction_deg is None:
+                self.report['stages'][name] = {'skipped': 'this build has no astro.refraction_deg'}
                 continue
             if name in ('compile', 'nan_scan', 'gpu_math', 'screens') and not self.cap.method:
                 self.report['stages'][name] = {'skipped': 'no working screen capture'}
@@ -657,7 +766,7 @@ class DeviceCheck(scene.Scene):
             self.pose = None
             self.guard.clear(key)
             self.save()
-            yield 0.2
+            yield W(0.2)
         self.report['stages']['lifecycle'] = {
             'updates': self.n_update, 'draws': self.n_draw - self._draws_by_capture,
             'draws_by_capture': self._draws_by_capture}
@@ -667,9 +776,48 @@ class DeviceCheck(scene.Scene):
         res['panel_pt'] = list(self.panel)
         yield 0.0
 
+    def st_imports(self, res):
+        """Parse every .py in the package (syntax errors anywhere), then import every
+        module that is meant to load on the device (the sandbox, the tests and the
+        desktop report reader are not)."""
+        import importlib
+        pkg = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        res['parsed'], res['imported'], res['failed'] = 0, [], {}
+        mods = []
+        for root, dirs, files in os.walk(pkg):
+            dirs[:] = sorted(d for d in dirs if not d.startswith(('.', '__')))
+            for f in sorted(files):
+                if not f.endswith('.py'):
+                    continue
+                path = os.path.join(root, f)
+                rel = os.path.relpath(path, os.path.dirname(pkg))
+                try:
+                    with open(path, 'rb') as fh:
+                        compile(fh.read(), path, 'exec')
+                    res['parsed'] += 1
+                except SyntaxError:
+                    res['failed'][rel] = traceback.format_exc(limit=1)
+                    continue
+                name = rel[:-3].replace(os.sep, '.')
+                if name.endswith('.__init__'):
+                    name = name[:-9]
+                parts = name.split('.')
+                if 'sandbox' in parts or 'tests' in parts or name.endswith('tools.device_report'):
+                    continue
+                mods.append(name)
+        for name in mods:
+            self.status('imports', name)
+            try:
+                importlib.import_module(name)
+                res['imported'].append(name)
+            except Exception:
+                res['failed'][name] = traceback.format_exc(limit=3)
+            yield 0.0
+        res['ok'] = not res['failed']
+
     def st_pacing(self, res):
         u0, d0 = self.n_update, self.n_draw
-        yield from self.measure(0.5, 3.0)
+        yield from self.measure(W(0.5, 0.1), W(3.0, 0.3))
         res['frames'] = self.last_stats
         res['updates'] = self.n_update - u0
         res['draws'] = self.n_draw - d0 - self._draws_by_capture
@@ -683,7 +831,7 @@ class DeviceCheck(scene.Scene):
         sp = scene.SpriteNode(self.white, parent=self, position=(self.size[0] / 2, self.size[1] / 2),
                               size=(60, 60))
         sp.shader = scene.Shader(SOLID_SHADER)
-        yield 0.3
+        yield W(0.3, 0.1)
         want = np.array([round(c * 255) for c in SOLID])
         for m in self.cap.candidates():
             key = 'capture:' + m
@@ -697,23 +845,28 @@ class DeviceCheck(scene.Scene):
                 ok = bool(np.abs(got - want).max() <= 4)
                 res['tried'][m] = {'ok': ok, 'got': got.tolist(), 'want': want.tolist(),
                                    'ms': round(dt * 1000, 1), 'shape': list(a.shape)}
-                if ok:
+                if ok and not self.cap.method:
                     self.cap.method = m
+                if self.cap.method and not SMOKE:      # a smoke run tries every method
                     self.guard.clear(key)
                     break
             except Exception:
                 res['tried'][m] = {'ok': False, 'error': traceback.format_exc(limit=3)}
             self.guard.clear(key)
-            yield 0.1
+            yield W(0.1)
         sp.remove_from_parent()
         res['method'] = self.cap.method
+        try:
+            res['hierarchy'] = self.cap.hierarchy()
+        except Exception:
+            res['hierarchy'] = traceback.format_exc(limit=2)
         if not self.cap.method:
             return
         # colour response: a 256-level ramp in R and G, read back
         self.probe = scene.SpriteNode(self.white, parent=self, size=(256, 4),
                                       position=(self.size[0] / 2, self.size[1] / 2))
         self.probe.shader = scene.Shader(RAMP_SHADER)
-        yield 0.3
+        yield W(0.3, 0.1)
         a = self.cap.grab()
         lvl = self.read_strip(a, 256)
         self.lut_r = lvl[:, 0].astype(int)
@@ -764,7 +917,7 @@ class DeviceCheck(scene.Scene):
             item = {'name': name, 'spec': spec, 'pose': pose}
             try:
                 item['build_s'] = round(self.build(spec, pose), 3)
-                yield from self.measure(0.0, 0.6)
+                yield from self.measure(0.0, W(0.6, 0.1))
                 item['first_frames'] = self.last_stats
                 rect = self.panel if spec['rect'] == 'panel' else self.full
                 c = self.shot('compile_' + name.replace(' ', '_').replace('=', ''), rect)
@@ -780,12 +933,13 @@ class DeviceCheck(scene.Scene):
         poses += [ground_pose(e) for e in (5.0, 0.2, -0.4, -3.0)]
         if QUICK:
             poses = poses[::2]
-        for q in RAY:
+        poses = pick(poses, [orbit_pose('overview', 'noon'), orbit_pose('astro'), ground_pose(-0.4)])
+        for q in pick(RAY, ('MED',)):
             for pose in poses:
                 spec = spec_for(pose, q, debug=('NANCHECK',))
                 self.status('NaN scan %s' % q, '%s %s' % (pose['view'], pose.get('sun_name', pose.get('elev'))))
                 self.build(spec, pose)
-                yield 0.35
+                yield W(0.35, 0.1)
                 rect = self.panel if spec['rect'] == 'panel' else self.full
                 st = pixel_stats(self.cap.crop(self.cap.grab(), rect))
                 res['checks'].append({'quality': q, 'view': pose['view'],
@@ -813,7 +967,7 @@ class DeviceCheck(scene.Scene):
                     sh.set_uniform(k, float(v))
                 sh.set_uniform('u_atm', (1.0 + 100.0 / km, float(km), 1.0, 0.0))
                 sh.set_uniform('u_sun', (1.0, 0.0, 0.0))
-                yield 0.25
+                yield W(0.25, 0.1)
                 vals = self.read_strip(self.cap.grab(), PROBE_N)
                 xs = np.linspace(x0, x1, PROBE_N)
                 got = np.array([lo + (hi - lo) * self.decode(v) for v in vals])
@@ -846,13 +1000,14 @@ class DeviceCheck(scene.Scene):
         jobs = [(q, p) for q in ('LEGACY',) + RAY for p in poses
                 if not (q == 'LEGACY' and p['view'] != 'overview')]
         jobs += [(q, ground_pose(e)) for q in ('MED', 'ULTRA') for e in (0.5, -0.3)]
+        jobs = pick(jobs, [('LOW', orbit_pose('overview', 'noon')), ('MED', ground_pose(0.5))])
         for q, pose in jobs:
             spec = spec_for(pose, q)
             name = 'screen_%s_%s_%s' % (q, pose['view'].replace('/', ''),
                                         pose.get('sun_name', 'e%+.1f' % pose.get('elev', 0)))
             self.status('screens', name)
             self.build(spec, pose)
-            yield 0.6
+            yield W(0.6, 0.15)
             rect = self.panel if spec['rect'] == 'panel' else self.full
             t = float(self.t)
             self.shot(name, rect, full_res=True)
@@ -864,15 +1019,15 @@ class DeviceCheck(scene.Scene):
     def timed(self, spec, pose, seconds, copies=0):
         """Generator: build, settle, time; self.last_stats gets build/first-frame too."""
         b = self.build(spec, pose, copies)
-        yield from self.measure(0.5, seconds)
+        yield from self.measure(W(0.5), seconds)
         self.last_stats['build_s'] = round(b, 3)
 
     def st_bench(self, res):
         res['runs'] = []
         slip = getattr(self, 'target_ms', 16.7) * 1.08
-        secs = 1.5 if QUICK else 2.5
-        for view in VIEWS:
-            for q in ('LEGACY',) + RAY:
+        secs = W(1.5 if QUICK else 2.5, 0.2)
+        for view in pick(VIEWS, ('overview', 'astro')):
+            for q in pick(('LEGACY',) + RAY, ('LEGACY', 'LOW')):
                 if q == 'LEGACY' and view in ('chase/P', 'astro'):
                     continue
                 pose = orbit_pose(view)
@@ -882,16 +1037,16 @@ class DeviceCheck(scene.Scene):
                 run = {'quality': q, 'view': view, 'stats': self.last_stats}
                 head = 0
                 if self.last_stats.get('mean95_ms', 99) < slip and q != 'LEGACY':
-                    for k in HEADROOM_STEPS:
+                    for k in pick(HEADROOM_STEPS, HEADROOM_STEPS[:1]):
                         self.status('headroom %s %s +%d' % (q, view, k))
-                        yield from self.timed(spec, pose, 1.2, copies=k)
+                        yield from self.timed(spec, pose, W(1.2, 0.1), copies=k)
                         if self.last_stats.get('mean95_ms', 99) > slip:
                             break
                         head = k
                     run['headroom'] = head + 1
                 res['runs'].append(run)
                 self.save()
-        for q in ('MED', 'HIGH', 'ULTRA'):
+        for q in pick(('MED', 'HIGH', 'ULTRA'), ('MED',)):
             pose = ground_pose(2.0)
             self.status('bench ground %s' % q)
             yield from self.timed(ground_spec(q), pose, secs)
@@ -901,7 +1056,7 @@ class DeviceCheck(scene.Scene):
     def st_refraction(self, res):
         """GPU-bound comparisons, so frame time tracks shader cost."""
         res['pairs'] = []
-        secs = 2.0 if QUICK else 3.0
+        secs = W(2.0 if QUICK else 3.0, 0.1)
         cases = [('ground ULTRA', lambda r: ground_spec('ULTRA', r), ground_pose(2.0), 0),
                  ('ground MED', lambda r: ground_spec('MED', r), ground_pose(2.0), 0),
                  ('orbit HIGH x4', lambda r: orbit_spec('HIGH', [f for f in self.preset_feats('HIGH')
@@ -923,11 +1078,11 @@ class DeviceCheck(scene.Scene):
 
     def st_weather(self, res):
         res['runs'] = []
-        for warp in (0.0, 3600.0, 14400.0):              # cloud seconds per second
+        for warp in pick((0.0, 3600.0, 14400.0), (0.0, 14400.0)):   # cloud seconds per second
             pose = orbit_pose('overview', 'noon')
             pose['warp'] = warp
             self.status('weather film', 'x%d' % warp)
-            yield from self.timed(orbit_spec('MED'), pose, 3.0 if QUICK else 6.0)
+            yield from self.timed(orbit_spec('MED'), pose, W(3.0 if QUICK else 6.0, 0.3))
             film = getattr(self.globes[0], 'film', None)
             res['runs'].append({'warp': warp, 'stats': self.last_stats,
                                 'film_frames_cached': len(getattr(film, '_cache', []) or [])})
@@ -946,7 +1101,7 @@ class DeviceCheck(scene.Scene):
             pass
         try:
             import zipfile
-            self.zip_path = os.path.join(os.path.dirname(self.dir), 'orbitgfx_device_report.zip')
+            self.zip_path = self.dir + '.zip'
             with zipfile.ZipFile(self.zip_path, 'w', zipfile.ZIP_DEFLATED) as z:
                 for root, _, files in os.walk(self.dir):
                     for f in files:
